@@ -1,0 +1,19 @@
+{
+  "name": "anymobile-print-helper",
+  "version": "1.0.0",
+  "description": "Desktop print helper for AnyMobile label printing with correct settings",
+  "author": "AnyMobile",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}
