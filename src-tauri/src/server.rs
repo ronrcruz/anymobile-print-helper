@@ -78,7 +78,7 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
         .allow_headers(Any);
 
     // Build router
-    let app = Router::new()
+    let app: Router = Router::new()
         .route("/ping", get(handle_ping))
         .route("/printers", get(handle_printers))
         .route("/print", post(handle_print))
