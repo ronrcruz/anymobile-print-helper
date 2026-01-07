@@ -108,11 +108,14 @@ jobs:
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
 
-          # Find and upload .sig files
-          for sig in $(find "$BUNDLE_DIR" -name "*.sig" -type f); do
+          echo "Looking for .sig files in: $BUNDLE_DIR"
+          find "$BUNDLE_DIR" -name "*.sig" -type f
+
+          # Use find with -print0 to handle spaces in filenames
+          find "$BUNDLE_DIR" -name "*.sig" -type f -print0 | while IFS= read -r -d '' sig; do
             filename=$(basename "$sig")
-            echo "Uploading $filename..."
-            gh release upload "${{ github.ref_name }}" "$sig" --clobber || true
+            echo "Uploading: $filename"
+            gh release upload "${{ github.ref_name }}" "$sig" --clobber || echo "Failed to upload $filename"
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -123,11 +126,14 @@ jobs:
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
 
-          # Find and upload .sig files
-          for sig in $(find "$BUNDLE_DIR" -name "*.sig" -type f); do
+          echo "Looking for .sig files in: $BUNDLE_DIR"
+          find "$BUNDLE_DIR" -name "*.sig" -type f
+
+          # Use find with -print0 to handle spaces in filenames
+          find "$BUNDLE_DIR" -name "*.sig" -type f -print0 | while IFS= read -r -d '' sig; do
             filename=$(basename "$sig")
-            echo "Uploading $filename..."
-            gh release upload "${{ github.ref_name }}" "$sig" --clobber || true
+            echo "Uploading: $filename"
+            gh release upload "${{ github.ref_name }}" "$sig" --clobber || echo "Failed to upload $filename"
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
