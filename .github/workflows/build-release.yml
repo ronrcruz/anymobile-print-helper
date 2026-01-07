@@ -93,6 +93,7 @@ jobs:
             Download the `aarch64.dmg` file, open it, and drag the app to Applications.
 
             ## What's New
+            - HTTPS support for secure communication with web app
             - High-quality print settings (600 DPI, matte paper) for Epson printers
             - Automatic updates - app checks for new versions on startup
             - Printer selection in web UI
@@ -100,5 +101,125 @@ jobs:
             - System tray integration
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
           args: --target ${{ matrix.target }}
+
+      - name: Upload signature files (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          # Find and upload .sig files
+          for sig in $(find "$BUNDLE_DIR" -name "*.sig" -type f); do
+            filename=$(basename "$sig")
+            echo "Uploading $filename..."
+            gh release upload "${{ github.ref_name }}" "$sig" --clobber || true
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload signature files (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          # Find and upload .sig files
+          for sig in $(find "$BUNDLE_DIR" -name "*.sig" -type f); do
+            filename=$(basename "$sig")
+            echo "Uploading $filename..."
+            gh release upload "${{ github.ref_name }}" "$sig" --clobber || true
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Generate updater JSON after all builds complete
+  updater-json:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Download signature files
+        run: |
+          mkdir -p sigs
+          gh release download "${{ github.ref_name }}" --pattern "*.sig" --dir sigs || true
+          ls -la sigs/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate latest.json
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ github.ref_name }}"
+
+          # Read signatures (base64 encoded content of .sig files)
+          MACOS_AARCH64_SIG=""
+          MACOS_X64_SIG=""
+          WINDOWS_SIG=""
+
+          if [ -f "sigs/AnyMobile Print Helper.app.tar.gz.sig" ]; then
+            MACOS_AARCH64_SIG=$(cat "sigs/AnyMobile Print Helper.app.tar.gz.sig")
+          fi
+
+          # Try different naming patterns
+          for f in sigs/*.app.tar.gz.sig; do
+            if [ -f "$f" ]; then
+              content=$(cat "$f")
+              if [[ "$f" == *"aarch64"* ]] || [[ "$f" == *"arm64"* ]]; then
+                MACOS_AARCH64_SIG="$content"
+              else
+                # Assume x64 if not explicitly arm
+                if [ -z "$MACOS_X64_SIG" ]; then
+                  MACOS_X64_SIG="$content"
+                elif [ -z "$MACOS_AARCH64_SIG" ]; then
+                  MACOS_AARCH64_SIG="$content"
+                fi
+              fi
+            fi
+          done
+
+          for f in sigs/*.exe.sig sigs/*.nsis.zip.sig; do
+            if [ -f "$f" ]; then
+              WINDOWS_SIG=$(cat "$f")
+              break
+            fi
+          done
+
+          # Create latest.json
+          cat > latest.json << EOF
+          {
+            "version": "$VERSION",
+            "notes": "HTTPS support, auto-updater, high-quality print settings",
+            "pub_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "$MACOS_AARCH64_SIG",
+                "url": "https://github.com/ronrcruz/anymobile-print-helper/releases/download/$TAG/AnyMobile.Print.Helper_aarch64.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "$MACOS_X64_SIG",
+                "url": "https://github.com/ronrcruz/anymobile-print-helper/releases/download/$TAG/AnyMobile.Print.Helper_x64.app.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "$WINDOWS_SIG",
+                "url": "https://github.com/ronrcruz/anymobile-print-helper/releases/download/$TAG/AnyMobile.Print.Helper_${VERSION}_x64-setup.nsis.zip"
+              }
+            }
+          }
+          EOF
+
+          echo "Generated latest.json:"
+          cat latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload latest.json
+        run: |
+          gh release upload "${{ github.ref_name }}" latest.json --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
