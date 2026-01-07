@@ -252,12 +252,39 @@ async fn print_pdf_macos(
         "scaling=100".to_string(),
     ];
 
+    // Apply printer-specific high-quality settings for labels
     if let Some(printer) = printer_name {
+        let printer_lower = printer.to_lowercase();
+
+        if printer_lower.contains("epson") {
+            // Epson-specific: 600 DPI, highest quality, premium matte paper
+            args.extend([
+                "-o".to_string(), "Resolution=600x600dpi".to_string(),
+                "-o".to_string(), "EPIJ_Qual=307".to_string(),
+                "-o".to_string(), "EPIJ_Medi=12".to_string(),  // Premium Presentation Paper Matte
+            ]);
+            tracing::info!("Applying Epson high-quality settings: 600dpi, quality=307, matte paper");
+        } else if printer_lower.contains("hp") || printer_lower.contains("laserjet") {
+            // HP-specific: use labels media type
+            args.extend([
+                "-o".to_string(), "MediaType=labels".to_string(),
+            ]);
+            tracing::info!("Applying HP settings: labels media type");
+        } else {
+            // Generic fallback: try common CUPS high quality option
+            args.extend([
+                "-o".to_string(), "print-quality=5".to_string(),
+            ]);
+            tracing::info!("Applying generic high-quality setting");
+        }
+
         args.push("-d".to_string());
         args.push(printer.to_string());
     }
 
     args.push(pdf_path.to_string());
+
+    tracing::info!("Executing lp with args: {:?}", args);
 
     let status = Command::new("lp")
         .args(&args)
