@@ -149,7 +149,7 @@ $copies = {copies}
 $adobePaths = @(
     "$env:ProgramFiles\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
     "$env:ProgramFiles\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-    "${env:ProgramFiles(x86)}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
+    "${{env:ProgramFiles(x86)}}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
 )
 
 $adobePath = $adobePaths | Where-Object {{ Test-Path $_ }} | Select-Object -First 1
