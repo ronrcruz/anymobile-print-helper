@@ -107,16 +107,23 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          TAG="${{ github.ref_name }}"
 
-          echo "Looking for .sig files in: $BUNDLE_DIR"
-          find "$BUNDLE_DIR" -name "*.sig" -type f
+          echo "=== DEBUG: Listing ALL files in bundle directory ==="
+          find "$BUNDLE_DIR" -type f -ls 2>/dev/null | head -50
 
-          # Use find with -print0 to handle spaces in filenames
-          find "$BUNDLE_DIR" -name "*.sig" -type f -print0 | while IFS= read -r -d '' sig; do
-            filename=$(basename "$sig")
-            echo "Uploading: $filename"
-            gh release upload "${{ github.ref_name }}" "$sig" --clobber || echo "Failed to upload $filename"
-          done
+          echo "=== Looking for .sig files ==="
+          find "$BUNDLE_DIR" -type f -name "*.sig" -ls
+
+          echo "=== Uploading .sig files using find -exec ==="
+          find "$BUNDLE_DIR" -type f -name "*.sig" -exec sh -c '
+            for f do
+              echo "Uploading: $f"
+              gh release upload "'"$TAG"'" "$f" --clobber 2>&1 || echo "FAILED to upload: $f"
+            done
+          ' sh {} +
+
+          echo "=== Done uploading signatures ==="
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -125,16 +132,23 @@ jobs:
         shell: bash
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          TAG="${{ github.ref_name }}"
 
-          echo "Looking for .sig files in: $BUNDLE_DIR"
-          find "$BUNDLE_DIR" -name "*.sig" -type f
+          echo "=== DEBUG: Listing ALL files in bundle directory ==="
+          find "$BUNDLE_DIR" -type f -ls 2>/dev/null | head -50
 
-          # Use find with -print0 to handle spaces in filenames
-          find "$BUNDLE_DIR" -name "*.sig" -type f -print0 | while IFS= read -r -d '' sig; do
-            filename=$(basename "$sig")
-            echo "Uploading: $filename"
-            gh release upload "${{ github.ref_name }}" "$sig" --clobber || echo "Failed to upload $filename"
-          done
+          echo "=== Looking for .sig files ==="
+          find "$BUNDLE_DIR" -type f -name "*.sig" -ls
+
+          echo "=== Uploading .sig files using find -exec ==="
+          find "$BUNDLE_DIR" -type f -name "*.sig" -exec sh -c '
+            for f do
+              echo "Uploading: $f"
+              gh release upload "'"$TAG"'" "$f" --clobber 2>&1 || echo "FAILED to upload: $f"
+            done
+          ' sh {} +
+
+          echo "=== Done uploading signatures ==="
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
