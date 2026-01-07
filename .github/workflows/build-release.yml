@@ -75,6 +75,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: v__VERSION__
           releaseName: 'AnyMobile Print Helper v__VERSION__'
@@ -91,10 +93,12 @@ jobs:
             Download the `aarch64.dmg` file, open it, and drag the app to Applications.
 
             ## What's New
+            - High-quality print settings (600 DPI, matte paper) for Epson printers
+            - Automatic updates - app checks for new versions on startup
+            - Printer selection in web UI
             - One-click printing from AnyMobile staff portal
-            - Automatic no-scale printing for Avery 5625 labels
             - System tray integration
-            - Auto-start on login
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true
           args: --target ${{ matrix.target }}

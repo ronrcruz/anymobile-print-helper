@@ -56,5 +56,12 @@
     "longDescription": "Desktop print helper for AnyMobile label printing with correct settings (no scaling, high quality)",
     "category": "Utility"
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ronrcruz/anymobile-print-helper/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0NzFDNzM3RDRCRTlBMTQKUldRVW1yN1VOOGR4ZEFndHBBajNJRXZmZFloTEw5Y1ZMVmxkcUkzUmVRL2lXME9oeFFPMFFvMlEK"
+    }
+  }
 }

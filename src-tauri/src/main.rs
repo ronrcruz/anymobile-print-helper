@@ -10,6 +10,7 @@ use tauri::{
     Manager,
 };
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_updater::UpdaterExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -38,6 +39,7 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::new(Mutex::new(AppState::default())))
         .setup(|app| {
             // Create system tray menu
@@ -92,6 +94,45 @@ fn main() {
                     let _ = window.hide();
                 }
             }
+
+            // Check for updates in background
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Wait a bit for app to fully initialize
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                match update_handle.updater() {
+                    Ok(updater) => {
+                        match updater.check().await {
+                            Ok(Some(update)) => {
+                                tracing::info!(
+                                    "Update available: {} -> {}",
+                                    update.current_version,
+                                    update.version
+                                );
+                                // Download and install the update
+                                match update.download_and_install(|_, _| {}, || {}).await {
+                                    Ok(_) => {
+                                        tracing::info!("Update installed successfully. Restart to apply.");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to install update: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::info!("App is up to date");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to check for updates: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Updater not available: {}", e);
+                    }
+                }
+            });
 
             Ok(())
         })
