@@ -1,4 +1,4 @@
-//! HTTP Server for receiving print jobs from the web app
+//! HTTP/HTTPS Server for receiving print jobs from the web app
 
 use axum::{
     body::Bytes,
@@ -8,19 +8,23 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
+use rcgen::{CertifiedKey, generate_simple_self_signed};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::path::PathBuf;
+use std::fs;
 use tauri::AppHandle;
-use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::printer;
 
 /// Server configuration
-const PRIMARY_PORT: u16 = 9847;
-const FALLBACK_PORTS: [u16; 2] = [9848, 9849];
+const HTTPS_PORT: u16 = 9847;
+const HTTP_PORT: u16 = 9848;
 
 /// Allowed origins for CORS
+#[allow(dead_code)]
 const ALLOWED_ORIGINS: [&str; 3] = [
     "http://localhost:3000",
     "https://anymobileus.com",
@@ -67,13 +71,56 @@ struct PrintOptions {
     copies: Option<u32>,
 }
 
-/// Start the HTTP server
+/// Get the path to store certificates
+fn get_cert_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("anymobile-print-helper")
+        .join("certs")
+}
+
+/// Generate or load a self-signed certificate for localhost
+fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    let cert_dir = get_cert_dir();
+    let cert_path = cert_dir.join("localhost.crt");
+    let key_path = cert_dir.join("localhost.key");
+
+    // Check if certificate already exists
+    if cert_path.exists() && key_path.exists() {
+        tracing::info!("Loading existing certificate from {:?}", cert_dir);
+        let cert_pem = fs::read(&cert_path)?;
+        let key_pem = fs::read(&key_path)?;
+        return Ok((cert_pem, key_pem));
+    }
+
+    // Generate new self-signed certificate
+    tracing::info!("Generating new self-signed certificate");
+    let subject_alt_names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)?;
+
+    let cert_pem = cert.pem().into_bytes();
+    let key_pem = key_pair.serialize_pem().into_bytes();
+
+    // Save certificate for future use
+    fs::create_dir_all(&cert_dir)?;
+    fs::write(&cert_path, &cert_pem)?;
+    fs::write(&key_path, &key_pem)?;
+    tracing::info!("Saved certificate to {:?}", cert_dir);
+
+    Ok((cert_pem, key_pem))
+}
+
+/// Start the HTTP/HTTPS server
 pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(ServerState { app_handle });
 
-    // Build CORS layer
+    // Build CORS layer - permissive for local desktop app
     let cors = CorsLayer::new()
-        .allow_origin(Any) // We'll validate in handlers for more control
+        .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -85,24 +132,34 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
         .layer(cors)
         .with_state(state);
 
-    // Try to bind to primary port, fall back to alternatives
-    let ports = std::iter::once(PRIMARY_PORT).chain(FALLBACK_PORTS);
+    // Get or create SSL certificate
+    let (cert_pem, key_pem) = get_or_create_certificate()?;
 
-    for port in ports {
-        let addr = format!("127.0.0.1:{}", port);
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                tracing::info!("Print helper server listening on {}", addr);
-                axum::serve(listener, app).await?;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!("Could not bind to port {}: {}", port, e);
-            }
+    // Configure TLS
+    let tls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
+
+    // Start HTTPS server on primary port
+    let https_addr = format!("127.0.0.1:{}", HTTPS_PORT);
+    tracing::info!("Starting HTTPS server on {}", https_addr);
+
+    // Clone app for HTTP server
+    let http_app = app.clone();
+
+    // Spawn HTTP fallback server on secondary port (for local development)
+    tokio::spawn(async move {
+        let http_addr = format!("127.0.0.1:{}", HTTP_PORT);
+        if let Ok(listener) = tokio::net::TcpListener::bind(&http_addr).await {
+            tracing::info!("HTTP fallback server listening on {}", http_addr);
+            let _ = axum::serve(listener, http_app).await;
         }
-    }
+    });
 
-    Err("Could not bind to any port".into())
+    // Run HTTPS server (this blocks)
+    axum_server::bind_rustls(https_addr.parse()?, tls_config)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
 }
 
 /// Handle /ping - health check and version info

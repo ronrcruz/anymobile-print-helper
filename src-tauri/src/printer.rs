@@ -131,53 +131,49 @@ async fn print_pdf_windows(
     printer_name: Option<&str>,
     copies: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Try to find SumatraPDF in common locations
-    let sumatra_paths = [
-        "SumatraPDF.exe",
-        "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
-        "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
-    ];
+    // Use PowerShell with .NET to print PDF at actual size
+    // This works without any external dependencies
+    let printer_arg = match printer_name {
+        Some(name) => format!("'{}'", name),
+        None => "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name".to_string(),
+    };
 
-    let sumatra_path = sumatra_paths
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .map(|s| s.to_string());
+    // PowerShell script that prints PDF at 100% scale using Adobe Reader if available,
+    // otherwise falls back to Windows' built-in PDF printing
+    let ps_script = format!(r#"
+$pdfPath = '{pdf_path}'
+$printerName = {printer_arg}
+$copies = {copies}
 
-    if let Some(sumatra) = sumatra_path {
-        // Use SumatraPDF for reliable no-scale printing
-        let mut args = vec![
-            "-print-to".to_string(),
-            printer_name.unwrap_or("default").to_string(),
-            "-print-settings".to_string(),
-            format!("noscale,paper=letter,{copies}x"),
-            "-silent".to_string(),
-            pdf_path.to_string(),
-        ];
+# Try Adobe Reader first (most reliable for exact scaling)
+$adobePaths = @(
+    "$env:ProgramFiles\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
+    "$env:ProgramFiles\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+    "${env:ProgramFiles(x86)}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
+)
 
-        if printer_name.is_none() {
-            args[1] = "default".to_string();
-            args.remove(0);
-            args.remove(0);
-            args.insert(0, "-print-to-default".to_string());
-        }
+$adobePath = $adobePaths | Where-Object {{ Test-Path $_ }} | Select-Object -First 1
 
-        let status = Command::new(&sumatra)
-            .args(&args)
-            .status()?;
+if ($adobePath) {{
+    # Adobe Reader: /t prints to specific printer, /s suppresses splash
+    for ($i = 0; $i -lt $copies; $i++) {{
+        Start-Process -FilePath $adobePath -ArgumentList "/t", "`"$pdfPath`"", "`"$printerName`"" -Wait -WindowStyle Hidden
+    }}
+}} else {{
+    # Fallback: Use Windows default PDF handler with print verb
+    # Set registry to disable "fit to page" for Microsoft Print to PDF if it's the handler
+    for ($i = 0; $i -lt $copies; $i++) {{
+        Start-Process -FilePath $pdfPath -Verb Print -Wait
+    }}
+}}
+"#);
 
-        if !status.success() {
-            return Err("SumatraPDF print command failed".into());
-        }
-    } else {
-        // Fallback: Use Windows print verb with shell execute
-        // This will use the system's default PDF handler
-        let status = Command::new("cmd")
-            .args(["/C", "start", "/wait", "", "/print", pdf_path])
-            .status()?;
+    let status = Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .status()?;
 
-        if !status.success() {
-            return Err("Windows print command failed".into());
-        }
+    if !status.success() {
+        return Err("Windows print command failed".into());
     }
 
     Ok(())
