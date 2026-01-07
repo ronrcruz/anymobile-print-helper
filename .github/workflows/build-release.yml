@@ -106,24 +106,25 @@ jobs:
       - name: Upload signature files (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ github.ref_name }}"
+          TARGET="${{ matrix.target }}"
 
-          echo "=== DEBUG: Listing ALL files in bundle directory ==="
-          find "$BUNDLE_DIR" -type f -ls 2>/dev/null | head -50
+          echo "=== DEBUG: Current directory and structure ==="
+          pwd
+          ls -la src-tauri/target/$TARGET/release/bundle/ 2>/dev/null || echo "Bundle dir not found"
+          ls -la src-tauri/target/$TARGET/release/bundle/macos/ 2>/dev/null || echo "macos dir not found"
 
-          echo "=== Looking for .sig files ==="
-          find "$BUNDLE_DIR" -type f -name "*.sig" -ls
+          echo "=== Looking for .sig files everywhere ==="
+          find src-tauri/target -name "*.sig" -type f 2>/dev/null || echo "No .sig files found anywhere"
 
-          echo "=== Uploading .sig files using find -exec ==="
-          find "$BUNDLE_DIR" -type f -name "*.sig" -exec sh -c '
-            for f do
-              echo "Uploading: $f"
-              gh release upload "'"$TAG"'" "$f" --clobber 2>&1 || echo "FAILED to upload: $f"
-            done
-          ' sh {} +
-
-          echo "=== Done uploading signatures ==="
+          # Try the exact path the tauri-action shows
+          SIG_FILE="src-tauri/target/$TARGET/release/bundle/macos/AnyMobile Print Helper.app.tar.gz.sig"
+          if [ -f "$SIG_FILE" ]; then
+            echo "Found signature file: $SIG_FILE"
+            gh release upload "$TAG" "$SIG_FILE" --clobber 2>&1
+          else
+            echo "Signature file not found at: $SIG_FILE"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -131,24 +132,25 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ github.ref_name }}"
+          TARGET="${{ matrix.target }}"
 
-          echo "=== DEBUG: Listing ALL files in bundle directory ==="
-          find "$BUNDLE_DIR" -type f -ls 2>/dev/null | head -50
+          echo "=== DEBUG: Current directory and structure ==="
+          pwd
+          ls -la src-tauri/target/$TARGET/release/bundle/ 2>/dev/null || echo "Bundle dir not found"
+          ls -la src-tauri/target/$TARGET/release/bundle/nsis/ 2>/dev/null || echo "nsis dir not found"
+          ls -la src-tauri/target/$TARGET/release/bundle/msi/ 2>/dev/null || echo "msi dir not found"
 
-          echo "=== Looking for .sig files ==="
-          find "$BUNDLE_DIR" -type f -name "*.sig" -ls
+          echo "=== Looking for .sig files everywhere ==="
+          find src-tauri/target -name "*.sig" -type f 2>/dev/null || echo "No .sig files found anywhere"
 
-          echo "=== Uploading .sig files using find -exec ==="
-          find "$BUNDLE_DIR" -type f -name "*.sig" -exec sh -c '
+          # Try to upload any .sig files found
+          find src-tauri/target -name "*.sig" -type f -exec sh -c '
             for f do
               echo "Uploading: $f"
-              gh release upload "'"$TAG"'" "$f" --clobber 2>&1 || echo "FAILED to upload: $f"
+              gh release upload "'"$TAG"'" "$f" --clobber 2>&1 || echo "FAILED: $f"
             done
           ' sh {} +
-
-          echo "=== Done uploading signatures ==="
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
