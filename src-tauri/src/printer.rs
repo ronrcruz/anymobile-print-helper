@@ -61,6 +61,8 @@ pub async fn print_pdf(
 
 #[cfg(target_os = "windows")]
 fn list_printers_windows() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> {
+    tracing::info!("Listing printers on Windows...");
+
     // Use PowerShell to list printers
     let output = Command::new("powershell")
         .args([
@@ -68,6 +70,10 @@ fn list_printers_windows() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error
             "Get-Printer | Select-Object Name, Default, PrinterStatus | ConvertTo-Json",
         ])
         .output()?;
+
+    tracing::info!("PowerShell exit status: {:?}", output.status);
+    tracing::debug!("PowerShell stdout: {}", String::from_utf8_lossy(&output.stdout));
+    tracing::debug!("PowerShell stderr: {}", String::from_utf8_lossy(&output.stderr));
 
     if !output.status.success() {
         return Ok(vec![]);
@@ -131,51 +137,86 @@ async fn print_pdf_windows(
     printer_name: Option<&str>,
     copies: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Use PowerShell with .NET to print PDF at actual size
-    // This works without any external dependencies
+    tracing::info!("=== WINDOWS PRINT DEBUG ===");
+    tracing::info!("PDF path: {}", pdf_path);
+    tracing::info!("Printer: {:?}", printer_name);
+    tracing::info!("Copies: {}", copies);
+
     let printer_arg = match printer_name {
         Some(name) => format!("'{}'", name),
         None => "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name".to_string(),
     };
 
-    // PowerShell script that prints PDF at 100% scale using Adobe Reader if available,
-    // otherwise falls back to Windows' built-in PDF printing
+    // PowerShell script with verbose output for debugging
     let ps_script = format!(r#"
 $pdfPath = '{pdf_path}'
 $printerName = {printer_arg}
 $copies = {copies}
 
+Write-Host "=== PDF PRINT DEBUG ==="
+Write-Host "PDF Path: $pdfPath"
+Write-Host "Printer: $printerName"
+Write-Host "Copies: $copies"
+
+# Check if PDF exists
+if (Test-Path $pdfPath) {{
+    Write-Host "PDF file exists: YES"
+}} else {{
+    Write-Host "PDF file exists: NO - THIS IS A PROBLEM!"
+}}
+
 # Try Adobe Reader first (most reliable for exact scaling)
 $adobePaths = @(
     "$env:ProgramFiles\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
     "$env:ProgramFiles\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-    "${{env:ProgramFiles(x86)}}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
+    "${{env:ProgramFiles(x86)}}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
+    "$env:ProgramFiles\Adobe\Reader 11.0\Reader\AcroRd32.exe",
+    "${{env:ProgramFiles(x86)}}\Adobe\Reader 11.0\Reader\AcroRd32.exe"
 )
 
+Write-Host "Checking for Adobe Reader..."
 $adobePath = $adobePaths | Where-Object {{ Test-Path $_ }} | Select-Object -First 1
 
 if ($adobePath) {{
-    # Adobe Reader: /t prints to specific printer, /s suppresses splash
+    Write-Host "Found Adobe Reader at: $adobePath"
+    Write-Host "Printing with Adobe Reader..."
     for ($i = 0; $i -lt $copies; $i++) {{
-        Start-Process -FilePath $adobePath -ArgumentList "/t", "`"$pdfPath`"", "`"$printerName`"" -Wait -WindowStyle Hidden
+        Write-Host "Printing copy $($i + 1) of $copies"
+        Start-Process -FilePath $adobePath -ArgumentList "/t", "`"$pdfPath`"", "`"$printerName`"" -Wait
     }}
+    Write-Host "Adobe Reader print complete"
 }} else {{
-    # Fallback: Use Windows default PDF handler with print verb
-    # Set registry to disable "fit to page" for Microsoft Print to PDF if it's the handler
+    Write-Host "Adobe Reader NOT FOUND"
+
+    # Fallback: Use default Windows print
+    Write-Host "Using Windows default print handler..."
     for ($i = 0; $i -lt $copies; $i++) {{
+        Write-Host "Printing copy $($i + 1) of $copies via default handler"
         Start-Process -FilePath $pdfPath -Verb Print -Wait
     }}
+    Write-Host "Default handler print complete"
 }}
+
+Write-Host "=== PRINT SCRIPT FINISHED ==="
 "#);
 
-    let status = Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_script])
-        .status()?;
+    tracing::info!("Executing PowerShell print script...");
 
-    if !status.success() {
-        return Err("Windows print command failed".into());
+    let output = Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .output()?;
+
+    tracing::info!("PowerShell exit status: {:?}", output.status);
+    tracing::info!("PowerShell stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+    tracing::info!("PowerShell stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    if !output.status.success() {
+        let err_msg = format!("Windows print failed. stderr: {}", String::from_utf8_lossy(&output.stderr));
+        tracing::error!("{}", err_msg);
+        return Err(err_msg.into());
     }
 
+    tracing::info!("=== WINDOWS PRINT COMPLETE ===");
     Ok(())
 }
 
