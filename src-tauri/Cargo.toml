@@ -20,7 +20,7 @@ axum = { version = "0.7", features = ["multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.5", features = ["cors"] }
 rcgen = "0.13"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 tempfile = "3"
 dirs = "5"
