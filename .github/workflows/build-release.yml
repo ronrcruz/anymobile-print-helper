@@ -75,9 +75,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Hardcoded key for testing (generated with --ci flag, no password)
-          TAURI_SIGNING_PRIVATE_KEY: dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5VWRtc3dTZ25XekNQNnhKS20yY3ZoR3Z3OG0ySGRMMEMwNUJDSHh0SWtWTUFBQkFBQUFBQUFBQUFBQUlBQUFBQU9aNkFrcEVac2txN0prY2g5ajFRM0pSdkxqKzRCMlhJaGU5cml1TUJvUmhNNGNZQnhmaEZPejhBY3FKVzA0TGpzN2dPQlc4Rk94MFRSUWs5UEFHTHcvMUlWQk9wcldFZVZ4dUsrc3dYT1RkQlQ5em9sSVM1UTlPZHg5dzJzS040NWJEUUt1OUVRWW89Cg==
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: 'AnyMobile Print Helper v__VERSION__'
