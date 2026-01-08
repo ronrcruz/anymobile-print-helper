@@ -1,4 +1,4 @@
-//! HTTP Server for receiving print jobs from the web app
+//! HTTP/HTTPS Server for receiving print jobs from the web app
 
 use axum::{
     body::Bytes,
@@ -8,23 +8,20 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
+use rcgen::{CertifiedKey, generate_simple_self_signed};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::path::PathBuf;
+use std::fs;
 use tauri::AppHandle;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::printer;
 
 /// Server configuration
-const HTTP_PORT: u16 = 9847;
-
-/// Allowed origins for CORS
-#[allow(dead_code)]
-const ALLOWED_ORIGINS: [&str; 3] = [
-    "http://localhost:3000",
-    "https://anymobileus.com",
-    "https://www.anymobileus.com",
-];
+const HTTPS_PORT: u16 = 9847;
+const HTTP_PORT: u16 = 9848;
 
 /// Server state
 struct ServerState {
@@ -66,7 +63,66 @@ struct PrintOptions {
     copies: Option<u32>,
 }
 
-/// Start the HTTP server
+/// Get the path to store certificates
+fn get_cert_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("anymobile-print-helper")
+        .join("certs")
+}
+
+/// Generate or load a self-signed certificate for localhost
+fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    let cert_dir = get_cert_dir();
+    let cert_path = cert_dir.join("localhost.crt");
+    let key_path = cert_dir.join("localhost.key");
+
+    // Check if certificate already exists and is valid
+    if cert_path.exists() && key_path.exists() {
+        tracing::info!("Loading existing certificate from {:?}", cert_dir);
+        match (fs::read(&cert_path), fs::read(&key_path)) {
+            (Ok(cert_pem), Ok(key_pem)) if !cert_pem.is_empty() && !key_pem.is_empty() => {
+                return Ok((cert_pem, key_pem));
+            }
+            _ => {
+                tracing::warn!("Existing certificate is invalid, regenerating...");
+                let _ = fs::remove_file(&cert_path);
+                let _ = fs::remove_file(&key_path);
+            }
+        }
+    }
+
+    // Generate new self-signed certificate
+    tracing::info!("Generating new self-signed certificate");
+    let subject_alt_names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
+        .map_err(|e| format!("Failed to generate certificate: {}", e))?;
+
+    let cert_pem = cert.pem().into_bytes();
+    let key_pem = key_pair.serialize_pem().into_bytes();
+
+    // Save certificate for future use
+    if let Err(e) = fs::create_dir_all(&cert_dir) {
+        tracing::warn!("Could not create cert directory: {}", e);
+    } else {
+        if let Err(e) = fs::write(&cert_path, &cert_pem) {
+            tracing::warn!("Could not save certificate: {}", e);
+        }
+        if let Err(e) = fs::write(&key_path, &key_pem) {
+            tracing::warn!("Could not save key: {}", e);
+        } else {
+            tracing::info!("Saved certificate to {:?}", cert_dir);
+        }
+    }
+
+    Ok((cert_pem, key_pem))
+}
+
+/// Start both HTTPS and HTTP servers
 pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(ServerState { app_handle });
 
@@ -84,12 +140,31 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
         .layer(cors)
         .with_state(state);
 
-    // Start HTTP server
-    let addr = format!("127.0.0.1:{}", HTTP_PORT);
-    tracing::info!("Starting HTTP server on {}", addr);
+    // Get or create SSL certificate
+    let (cert_pem, key_pem) = get_or_create_certificate()?;
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // Configure TLS
+    let tls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
+
+    // Clone app for HTTP server
+    let http_app = app.clone();
+
+    // Start HTTP fallback server on secondary port (for Windows/Chrome/Firefox)
+    tokio::spawn(async move {
+        let http_addr = format!("127.0.0.1:{}", HTTP_PORT);
+        if let Ok(listener) = tokio::net::TcpListener::bind(&http_addr).await {
+            tracing::info!("HTTP server listening on {}", http_addr);
+            let _ = axum::serve(listener, http_app).await;
+        }
+    });
+
+    // Start HTTPS server on primary port (for Safari)
+    let https_addr = format!("127.0.0.1:{}", HTTPS_PORT);
+    tracing::info!("Starting HTTPS server on {}", https_addr);
+
+    axum_server::bind_rustls(https_addr.parse()?, tls_config)
+        .serve(app.into_make_service())
+        .await?;
 
     Ok(())
 }
