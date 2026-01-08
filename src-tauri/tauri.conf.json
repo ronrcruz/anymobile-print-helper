@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AnyMobile Print Helper",
   "identifier": "com.anymobile.print-helper",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
@@ -62,7 +62,7 @@
       "endpoints": [
         "https://github.com/ronrcruz/anymobile-print-helper/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0NzFDNzM3RDRCRTlBMTQKUldRVW1yN1VOOGR4ZEFndHBBajNJRXZmZFloTEw5Y1ZMVmxkcUkzUmVRL2lXME9oeFFPMFFvMlEK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBQjIxOTkxOTI4MDlFMzkKUldRNW5vQ1NrUm15U2o4QWNxSlcwNExqczdnT0JXOEZPeDBUUlFrOVBBR0x3LzFJVkJPcHJXRWUK"
     }
   }
 }
