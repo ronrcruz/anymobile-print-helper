@@ -1,4 +1,4 @@
-//! HTTP/HTTPS Server for receiving print jobs from the web app
+//! HTTP Server for receiving print jobs from the web app
 
 use axum::{
     body::Bytes,
@@ -8,20 +8,15 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum_server::tls_rustls::RustlsConfig;
-use rcgen::{CertifiedKey, generate_simple_self_signed};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::path::PathBuf;
-use std::fs;
 use tauri::AppHandle;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::printer;
 
 /// Server configuration
-const HTTPS_PORT: u16 = 9847;
-const HTTP_PORT: u16 = 9848;
+const HTTP_PORT: u16 = 9847;
 
 /// Allowed origins for CORS
 #[allow(dead_code)]
@@ -71,159 +66,7 @@ struct PrintOptions {
     copies: Option<u32>,
 }
 
-/// Get the path to store certificates
-fn get_cert_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("anymobile-print-helper")
-        .join("certs")
-}
-
-/// Check if certificate is installed in Windows Trusted Root store
-#[cfg(target_os = "windows")]
-fn is_cert_installed() -> bool {
-    use std::process::Command;
-
-    // Actually check if the cert is in the Windows store (not just a marker file)
-    let output = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-Command",
-            "Get-ChildItem -Path Cert:\\LocalMachine\\Root | Where-Object { $_.Subject -like '*localhost*' } | Measure-Object | Select-Object -ExpandProperty Count"
-        ])
-        .output();
-
-    match output {
-        Ok(out) => {
-            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            tracing::info!("Localhost certs in Trusted Root store: {}", count_str);
-            count_str.parse::<i32>().unwrap_or(0) > 0
-        }
-        Err(e) => {
-            tracing::warn!("Could not check cert store: {}", e);
-            false
-        }
-    }
-}
-
-/// Install certificate to Windows Trusted Root Certificate Store
-#[cfg(target_os = "windows")]
-fn install_cert_to_trusted_store(cert_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::process::Command;
-    use std::io::Write;
-
-    let cert_path_str = cert_path.to_string_lossy().to_string();
-    tracing::info!("Installing certificate to Windows Trusted Root store: {}", cert_path_str);
-
-    // Create a batch file that installs the cert (easier than escaping PowerShell)
-    let cert_dir = get_cert_dir();
-    let batch_path = cert_dir.join("install_cert.bat");
-
-    let batch_content = format!(r#"@echo off
-echo Installing AnyMobile Print Helper certificate...
-certutil -addstore -f "Root" "{}"
-if %errorlevel% equ 0 (
-    echo Certificate installed successfully!
-) else (
-    echo Failed to install certificate. Error code: %errorlevel%
-)
-pause
-"#, cert_path_str.replace("/", "\\"));
-
-    // Write the batch file
-    let mut file = fs::File::create(&batch_path)?;
-    file.write_all(batch_content.as_bytes())?;
-    drop(file);
-
-    tracing::info!("Created batch file at: {:?}", batch_path);
-
-    // Run the batch file with elevation using PowerShell
-    let batch_path_str = batch_path.to_string_lossy().to_string();
-    let output = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-Command",
-            &format!(r#"Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c "{}""#, batch_path_str.replace("\\", "/"))
-        ])
-        .output()?;
-
-    tracing::info!("PowerShell exit code: {:?}", output.status);
-    tracing::info!("PowerShell stdout: {}", String::from_utf8_lossy(&output.stdout));
-    tracing::info!("PowerShell stderr: {}", String::from_utf8_lossy(&output.stderr));
-
-    // Clean up batch file
-    let _ = fs::remove_file(&batch_path);
-
-    // Mark as installed so we don't prompt again
-    let installed_marker = cert_dir.join(".installed");
-    let _ = fs::write(&installed_marker, "installed");
-    tracing::info!("Certificate installation completed");
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn is_cert_installed() -> bool {
-    true // On macOS/Linux, we don't need to install to system store
-}
-
-#[cfg(not(target_os = "windows"))]
-fn install_cert_to_trusted_store(_cert_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Ok(()) // No-op on non-Windows
-}
-
-/// Generate or load a self-signed certificate for localhost
-fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
-    let cert_dir = get_cert_dir();
-    let cert_path = cert_dir.join("localhost.crt");
-    let key_path = cert_dir.join("localhost.key");
-
-    // Check if certificate already exists and is valid
-    if cert_path.exists() && key_path.exists() {
-        tracing::info!("Loading existing certificate from {:?}", cert_dir);
-        match (fs::read(&cert_path), fs::read(&key_path)) {
-            (Ok(cert_pem), Ok(key_pem)) if !cert_pem.is_empty() && !key_pem.is_empty() => {
-                return Ok((cert_pem, key_pem));
-            }
-            _ => {
-                tracing::warn!("Existing certificate is invalid, regenerating...");
-                let _ = fs::remove_file(&cert_path);
-                let _ = fs::remove_file(&key_path);
-            }
-        }
-    }
-
-    // Generate new self-signed certificate
-    tracing::info!("Generating new self-signed certificate");
-    let subject_alt_names = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-    ];
-
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
-        .map_err(|e| format!("Failed to generate certificate: {}", e))?;
-
-    let cert_pem = cert.pem().into_bytes();
-    let key_pem = key_pair.serialize_pem().into_bytes();
-
-    // Save certificate for future use (don't fail if we can't save)
-    if let Err(e) = fs::create_dir_all(&cert_dir) {
-        tracing::warn!("Could not create cert directory: {}", e);
-    } else {
-        if let Err(e) = fs::write(&cert_path, &cert_pem) {
-            tracing::warn!("Could not save certificate: {}", e);
-        }
-        if let Err(e) = fs::write(&key_path, &key_pem) {
-            tracing::warn!("Could not save key: {}", e);
-        } else {
-            tracing::info!("Saved certificate to {:?}", cert_dir);
-        }
-    }
-
-    Ok((cert_pem, key_pem))
-}
-
-/// Start the HTTP/HTTPS server
+/// Start the HTTP server
 pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(ServerState { app_handle });
 
@@ -241,44 +84,12 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
         .layer(cors)
         .with_state(state);
 
-    // Get or create SSL certificate
-    let (cert_pem, key_pem) = get_or_create_certificate()?;
+    // Start HTTP server
+    let addr = format!("127.0.0.1:{}", HTTP_PORT);
+    tracing::info!("Starting HTTP server on {}", addr);
 
-    // On Windows, install certificate to Trusted Root store (one-time, requires admin)
-    if !is_cert_installed() {
-        let cert_dir = get_cert_dir();
-        let cert_path = cert_dir.join("localhost.crt");
-        if cert_path.exists() {
-            tracing::info!("First run detected - installing certificate to Windows Trusted Root store");
-            if let Err(e) = install_cert_to_trusted_store(&cert_path) {
-                tracing::warn!("Could not auto-install certificate: {}. Users may need to accept it manually.", e);
-            }
-        }
-    }
-
-    // Configure TLS
-    let tls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
-
-    // Start HTTPS server on primary port
-    let https_addr = format!("127.0.0.1:{}", HTTPS_PORT);
-    tracing::info!("Starting HTTPS server on {}", https_addr);
-
-    // Clone app for HTTP server
-    let http_app = app.clone();
-
-    // Spawn HTTP fallback server on secondary port (for local development)
-    tokio::spawn(async move {
-        let http_addr = format!("127.0.0.1:{}", HTTP_PORT);
-        if let Ok(listener) = tokio::net::TcpListener::bind(&http_addr).await {
-            tracing::info!("HTTP fallback server listening on {}", http_addr);
-            let _ = axum::serve(listener, http_app).await;
-        }
-    });
-
-    // Run HTTPS server (this blocks)
-    axum_server::bind_rustls(https_addr.parse()?, tls_config)
-        .serve(app.into_make_service())
-        .await?;
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
