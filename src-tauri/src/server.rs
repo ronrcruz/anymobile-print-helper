@@ -82,66 +82,84 @@ fn get_cert_dir() -> PathBuf {
 /// Check if certificate is installed in Windows Trusted Root store
 #[cfg(target_os = "windows")]
 fn is_cert_installed() -> bool {
-    let cert_dir = get_cert_dir();
-    let installed_marker = cert_dir.join(".installed");
-    installed_marker.exists()
+    use std::process::Command;
+
+    // Actually check if the cert is in the Windows store (not just a marker file)
+    let output = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy", "Bypass",
+            "-Command",
+            "Get-ChildItem -Path Cert:\\LocalMachine\\Root | Where-Object { $_.Subject -like '*localhost*' } | Measure-Object | Select-Object -ExpandProperty Count"
+        ])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            tracing::info!("Localhost certs in Trusted Root store: {}", count_str);
+            count_str.parse::<i32>().unwrap_or(0) > 0
+        }
+        Err(e) => {
+            tracing::warn!("Could not check cert store: {}", e);
+            false
+        }
+    }
 }
 
 /// Install certificate to Windows Trusted Root Certificate Store
 #[cfg(target_os = "windows")]
 fn install_cert_to_trusted_store(cert_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
+    use std::io::Write;
 
-    let cert_path_str = cert_path.to_string_lossy();
+    let cert_path_str = cert_path.to_string_lossy().to_string();
     tracing::info!("Installing certificate to Windows Trusted Root store: {}", cert_path_str);
 
-    // Use certutil to add the certificate to the Trusted Root store
-    // This requires admin privileges, so we use PowerShell with -Verb RunAs
-    let ps_script = format!(r#"
-$certPath = '{}'
+    // Create a batch file that installs the cert (easier than escaping PowerShell)
+    let cert_dir = get_cert_dir();
+    let batch_path = cert_dir.join("install_cert.bat");
 
-# Check if already installed by looking for our cert in the store
-$existingCert = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object {{ $_.Subject -like '*localhost*' -and $_.Issuer -like '*localhost*' }}
+    let batch_content = format!(r#"@echo off
+echo Installing AnyMobile Print Helper certificate...
+certutil -addstore -f "Root" "{}"
+if %errorlevel% equ 0 (
+    echo Certificate installed successfully!
+) else (
+    echo Failed to install certificate. Error code: %errorlevel%
+)
+pause
+"#, cert_path_str.replace("/", "\\"));
 
-if ($existingCert) {{
-    Write-Host "Certificate already installed in Trusted Root store"
-}} else {{
-    Write-Host "Installing certificate to Trusted Root store..."
+    // Write the batch file
+    let mut file = fs::File::create(&batch_path)?;
+    file.write_all(batch_content.as_bytes())?;
+    drop(file);
 
-    # Import the certificate
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+    tracing::info!("Created batch file at: {:?}", batch_path);
 
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
-    $store.Open("ReadWrite")
-    $store.Add($cert)
-    $store.Close()
-
-    Write-Host "Certificate installed successfully!"
-}}
-"#, cert_path_str.replace("\\", "\\\\"));
-
-    // Run PowerShell with elevation
+    // Run the batch file with elevation using PowerShell
+    let batch_path_str = batch_path.to_string_lossy().to_string();
     let output = Command::new("powershell")
         .args([
             "-ExecutionPolicy", "Bypass",
             "-Command",
-            &format!("Start-Process powershell -Verb RunAs -Wait -ArgumentList '-ExecutionPolicy Bypass -Command {}'",
-                ps_script.replace("'", "''").replace("\n", "; "))
+            &format!(r#"Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c "{}""#, batch_path_str.replace("\\", "/"))
         ])
         .output()?;
 
-    if output.status.success() {
-        // Mark as installed so we don't prompt again
-        let cert_dir = get_cert_dir();
-        let installed_marker = cert_dir.join(".installed");
-        let _ = fs::write(&installed_marker, "installed");
-        tracing::info!("Certificate installation completed");
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Certificate installation failed: {}", stderr);
-        Err(format!("Failed to install certificate: {}", stderr).into())
-    }
+    tracing::info!("PowerShell exit code: {:?}", output.status);
+    tracing::info!("PowerShell stdout: {}", String::from_utf8_lossy(&output.stdout));
+    tracing::info!("PowerShell stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Clean up batch file
+    let _ = fs::remove_file(&batch_path);
+
+    // Mark as installed so we don't prompt again
+    let installed_marker = cert_dir.join(".installed");
+    let _ = fs::write(&installed_marker, "installed");
+    tracing::info!("Certificate installation completed");
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
