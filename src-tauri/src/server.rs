@@ -79,6 +79,81 @@ fn get_cert_dir() -> PathBuf {
         .join("certs")
 }
 
+/// Check if certificate is installed in Windows Trusted Root store
+#[cfg(target_os = "windows")]
+fn is_cert_installed() -> bool {
+    let cert_dir = get_cert_dir();
+    let installed_marker = cert_dir.join(".installed");
+    installed_marker.exists()
+}
+
+/// Install certificate to Windows Trusted Root Certificate Store
+#[cfg(target_os = "windows")]
+fn install_cert_to_trusted_store(cert_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Command;
+
+    let cert_path_str = cert_path.to_string_lossy();
+    tracing::info!("Installing certificate to Windows Trusted Root store: {}", cert_path_str);
+
+    // Use certutil to add the certificate to the Trusted Root store
+    // This requires admin privileges, so we use PowerShell with -Verb RunAs
+    let ps_script = format!(r#"
+$certPath = '{}'
+
+# Check if already installed by looking for our cert in the store
+$existingCert = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object {{ $_.Subject -like '*localhost*' -and $_.Issuer -like '*localhost*' }}
+
+if ($existingCert) {{
+    Write-Host "Certificate already installed in Trusted Root store"
+}} else {{
+    Write-Host "Installing certificate to Trusted Root store..."
+
+    # Import the certificate
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+    $store.Open("ReadWrite")
+    $store.Add($cert)
+    $store.Close()
+
+    Write-Host "Certificate installed successfully!"
+}}
+"#, cert_path_str.replace("\\", "\\\\"));
+
+    // Run PowerShell with elevation
+    let output = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy", "Bypass",
+            "-Command",
+            &format!("Start-Process powershell -Verb RunAs -Wait -ArgumentList '-ExecutionPolicy Bypass -Command {}'",
+                ps_script.replace("'", "''").replace("\n", "; "))
+        ])
+        .output()?;
+
+    if output.status.success() {
+        // Mark as installed so we don't prompt again
+        let cert_dir = get_cert_dir();
+        let installed_marker = cert_dir.join(".installed");
+        let _ = fs::write(&installed_marker, "installed");
+        tracing::info!("Certificate installation completed");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("Certificate installation failed: {}", stderr);
+        Err(format!("Failed to install certificate: {}", stderr).into())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_cert_installed() -> bool {
+    true // On macOS/Linux, we don't need to install to system store
+}
+
+#[cfg(not(target_os = "windows"))]
+fn install_cert_to_trusted_store(_cert_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(()) // No-op on non-Windows
+}
+
 /// Generate or load a self-signed certificate for localhost
 fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
     let cert_dir = get_cert_dir();
@@ -150,6 +225,18 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
 
     // Get or create SSL certificate
     let (cert_pem, key_pem) = get_or_create_certificate()?;
+
+    // On Windows, install certificate to Trusted Root store (one-time, requires admin)
+    if !is_cert_installed() {
+        let cert_dir = get_cert_dir();
+        let cert_path = cert_dir.join("localhost.crt");
+        if cert_path.exists() {
+            tracing::info!("First run detected - installing certificate to Windows Trusted Root store");
+            if let Err(e) = install_cert_to_trusted_store(&cert_path) {
+                tracing::warn!("Could not auto-install certificate: {}. Users may need to accept it manually.", e);
+            }
+        }
+    }
 
     // Configure TLS
     let tls_config = RustlsConfig::from_pem(cert_pem, key_pem).await?;
