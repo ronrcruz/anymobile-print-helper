@@ -80,17 +80,24 @@ fn get_cert_dir() -> PathBuf {
 }
 
 /// Generate or load a self-signed certificate for localhost
-fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
     let cert_dir = get_cert_dir();
     let cert_path = cert_dir.join("localhost.crt");
     let key_path = cert_dir.join("localhost.key");
 
-    // Check if certificate already exists
+    // Check if certificate already exists and is valid
     if cert_path.exists() && key_path.exists() {
         tracing::info!("Loading existing certificate from {:?}", cert_dir);
-        let cert_pem = fs::read(&cert_path)?;
-        let key_pem = fs::read(&key_path)?;
-        return Ok((cert_pem, key_pem));
+        match (fs::read(&cert_path), fs::read(&key_path)) {
+            (Ok(cert_pem), Ok(key_pem)) if !cert_pem.is_empty() && !key_pem.is_empty() => {
+                return Ok((cert_pem, key_pem));
+            }
+            _ => {
+                tracing::warn!("Existing certificate is invalid, regenerating...");
+                let _ = fs::remove_file(&cert_path);
+                let _ = fs::remove_file(&key_path);
+            }
+        }
     }
 
     // Generate new self-signed certificate
@@ -100,22 +107,31 @@ fn get_or_create_certificate() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error:
         "127.0.0.1".to_string(),
     ];
 
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)?;
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
+        .map_err(|e| format!("Failed to generate certificate: {}", e))?;
 
     let cert_pem = cert.pem().into_bytes();
     let key_pem = key_pair.serialize_pem().into_bytes();
 
-    // Save certificate for future use
-    fs::create_dir_all(&cert_dir)?;
-    fs::write(&cert_path, &cert_pem)?;
-    fs::write(&key_path, &key_pem)?;
-    tracing::info!("Saved certificate to {:?}", cert_dir);
+    // Save certificate for future use (don't fail if we can't save)
+    if let Err(e) = fs::create_dir_all(&cert_dir) {
+        tracing::warn!("Could not create cert directory: {}", e);
+    } else {
+        if let Err(e) = fs::write(&cert_path, &cert_pem) {
+            tracing::warn!("Could not save certificate: {}", e);
+        }
+        if let Err(e) = fs::write(&key_path, &key_pem) {
+            tracing::warn!("Could not save key: {}", e);
+        } else {
+            tracing::info!("Saved certificate to {:?}", cert_dir);
+        }
+    }
 
     Ok((cert_pem, key_pem))
 }
 
 /// Start the HTTP/HTTPS server
-pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(ServerState { app_handle });
 
     // Build CORS layer - permissive for local desktop app
