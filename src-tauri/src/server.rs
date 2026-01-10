@@ -20,8 +20,8 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::printer;
 
 /// Server configuration
-const HTTPS_PORT: u16 = 9847;
-const HTTP_PORT: u16 = 9848;
+pub const HTTPS_PORT: u16 = 9847;
+pub const HTTP_PORT: u16 = 9848;
 
 /// Server state
 struct ServerState {

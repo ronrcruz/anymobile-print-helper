@@ -11,96 +11,900 @@
             box-sizing: border-box;
         }
 
+        :root {
+            --color-success: #10B981;
+            --color-warning: #F59E0B;
+            --color-error: #EF4444;
+            --color-bg-primary: #1B4F8C;
+            --color-bg-secondary: #0d2d52;
+            --color-card: rgba(255, 255, 255, 0.08);
+            --color-card-hover: rgba(255, 255, 255, 0.12);
+            --color-text: white;
+            --color-text-muted: rgba(255, 255, 255, 0.7);
+            --radius: 10px;
+            --radius-sm: 6px;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #1B4F8C 0%, #0d2d52 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--color-bg-primary) 0%, var(--color-bg-secondary) 100%);
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
+            color: var(--color-text);
+            font-size: 13px;
         }
 
-        .container {
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header .logo { font-size: 1.75rem; }
+        .header h1 { font-size: 1rem; font-weight: 600; flex: 1; }
+        .header .version { font-size: 0.7rem; opacity: 0.6; }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(0, 0, 0, 0.1);
+        }
+
+        .tab {
+            flex: 1;
+            padding: 0.6rem 0.5rem;
             text-align: center;
-            padding: 2rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            opacity: 0.7;
         }
 
-        .logo {
-            font-size: 3rem;
-            margin-bottom: 1rem;
+        .tab:hover { opacity: 1; background: rgba(255, 255, 255, 0.05); }
+        .tab.active {
+            opacity: 1;
+            border-bottom-color: var(--color-success);
+            background: rgba(255, 255, 255, 0.05);
         }
 
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-        }
+        /* Tab Content */
+        .tab-content { display: none; padding: 1rem; overflow-y: auto; height: calc(100vh - 140px); }
+        .tab-content.active { display: block; }
 
-        .status {
-            display: flex;
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
             align-items: center;
-            justify-content: center;
             gap: 0.5rem;
-            margin: 1.5rem 0;
-            padding: 0.75rem 1.5rem;
-            background: rgba(255, 255, 255, 0.1);
+            padding: 0.6rem 1.25rem;
             border-radius: 9999px;
-            font-size: 0.875rem;
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin: 0.75rem auto;
         }
 
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            background: #10B981;
+        .status-badge.ready { background: rgba(16, 185, 129, 0.2); color: var(--color-success); }
+        .status-badge.warning { background: rgba(245, 158, 11, 0.2); color: var(--color-warning); }
+        .status-badge.error { background: rgba(239, 68, 68, 0.2); color: var(--color-error); }
+
+        .status-badge .dot {
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
+
+        .status-badge.ready .dot { background: var(--color-success); }
+        .status-badge.warning .dot { background: var(--color-warning); }
+        .status-badge.error .dot { background: var(--color-error); }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
 
-        .info {
-            font-size: 0.875rem;
-            opacity: 0.8;
-            line-height: 1.6;
+        /* Cards */
+        .card {
+            background: var(--color-card);
+            border-radius: var(--radius);
+            padding: 0.875rem;
+            margin-bottom: 0.875rem;
         }
 
-        .port {
-            font-family: monospace;
-            background: rgba(255, 255, 255, 0.2);
-            padding: 0.125rem 0.5rem;
-            border-radius: 4px;
+        .card h2 {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            opacity: 0.7;
+            margin-bottom: 0.6rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
 
-        .minimize-hint {
-            margin-top: 2rem;
+        .card h2 .badge {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 0.1rem 0.4rem;
+            border-radius: 9999px;
+            font-size: 0.65rem;
+            text-transform: none;
+        }
+
+        /* Status Rows */
+        .status-row {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .status-row:last-child { border-bottom: none; }
+
+        .status-indicator {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .status-indicator.success { background: var(--color-success); }
+        .status-indicator.warning { background: var(--color-warning); }
+        .status-indicator.error { background: var(--color-error); }
+
+        .status-row .label { flex: 1; font-size: 0.8rem; }
+        .status-row .value { font-size: 0.7rem; opacity: 0.7; font-family: monospace; }
+
+        /* Printer List */
+        .printer-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .printer-item:last-child { border-bottom: none; }
+        .printer-item .name { flex: 1; font-size: 0.8rem; }
+        .printer-item .default-star { color: var(--color-warning); font-size: 0.9rem; }
+        .printer-item .status {
+            font-size: 0.65rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: var(--radius-sm);
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--color-success);
+        }
+
+        /* Buttons */
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+            margin: 1rem 0;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            flex: 1;
+            min-width: 100px;
+            padding: 0.6rem 0.75rem;
+            border: none;
+            border-radius: var(--radius-sm);
             font-size: 0.75rem;
-            opacity: 0.6;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
         }
+
+        .btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
+        .btn:active { transform: translateY(0); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-primary { background: var(--color-success); color: white; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.15); color: white; }
+        .btn-warning { background: var(--color-warning); color: white; }
+        .btn-small {
+            flex: none;
+            padding: 0.4rem 0.6rem;
+            font-size: 0.7rem;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: none;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+
+        .btn-small:hover { background: rgba(255, 255, 255, 0.2); }
+
+        /* Windows Certificate Section */
+        .cert-install-section {
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            border-radius: var(--radius);
+            padding: 0.75rem;
+            margin: 0.75rem 0;
+        }
+
+        .cert-install-section.trusted {
+            background: rgba(16, 185, 129, 0.1);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .cert-install-section h3 {
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-bottom: 0.4rem;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .cert-install-section p {
+            font-size: 0.7rem;
+            opacity: 0.8;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Logs */
+        .log-filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .log-filter {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.65rem;
+            border-radius: var(--radius-sm);
+            background: rgba(255, 255, 255, 0.1);
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+
+        .log-filter.active { border-color: var(--color-success); background: rgba(16, 185, 129, 0.2); }
+        .log-filter:hover { background: rgba(255, 255, 255, 0.15); }
+
+        .log-container {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: var(--radius-sm);
+            padding: 0.5rem;
+            height: 280px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.65rem;
+            line-height: 1.5;
+        }
+
+        .log-entry { padding: 0.15rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
+        .log-entry .time { opacity: 0.5; margin-right: 0.5rem; }
+        .log-entry .level { font-weight: 600; margin-right: 0.5rem; }
+        .log-entry .level.INFO { color: #60A5FA; }
+        .log-entry .level.WARN { color: var(--color-warning); }
+        .log-entry .level.ERROR { color: var(--color-error); }
+        .log-entry .level.DEBUG { color: #A78BFA; }
+
+        /* Copy URL */
+        .copy-url {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 0.4rem 0.6rem;
+            border-radius: var(--radius-sm);
+            margin: 0.3rem 0;
+            font-family: monospace;
+            font-size: 0.7rem;
+        }
+
+        .copy-url span { flex: 1; }
+        .copy-url button {
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: white;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.6rem;
+            cursor: pointer;
+        }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 0.6rem 1.2rem;
+            border-radius: var(--radius);
+            font-size: 0.75rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 100;
+        }
+
+        .toast.show { opacity: 1; }
+
+        /* Hint */
+        .hint {
+            text-align: center;
+            font-size: 0.65rem;
+            opacity: 0.4;
+            padding: 0.5rem;
+        }
+
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
-    <div class="container">
+    <header class="header">
         <div class="logo">🖨️</div>
         <h1>AnyMobile Print Helper</h1>
+        <span class="version" id="version">v1.0.23</span>
+    </header>
 
-        <div class="status">
-            <div class="status-dot"></div>
-            <span>Running</span>
+    <nav class="tabs">
+        <div class="tab active" data-tab="status">Status</div>
+        <div class="tab" data-tab="network">Network</div>
+        <div class="tab" data-tab="certificate">Certificate</div>
+        <div class="tab" data-tab="logs">Logs</div>
+    </nav>
+
+    <!-- STATUS TAB -->
+    <div class="tab-content active" id="tab-status">
+        <div style="text-align: center;">
+            <div class="status-badge ready" id="overall-status">
+                <span class="dot"></span>
+                <span id="status-text">Ready to Print</span>
+            </div>
         </div>
 
-        <p class="info">
-            Listening on <span class="port">localhost:9847</span><br>
-            Ready to receive print jobs from AnyMobile
-        </p>
+        <section class="card">
+            <h2>Server Status</h2>
+            <div class="status-row">
+                <span class="status-indicator success" id="https-indicator"></span>
+                <span class="label">HTTPS Server (9847)</span>
+                <span class="value" id="https-status">Running</span>
+            </div>
+            <div class="status-row">
+                <span class="status-indicator success" id="http-indicator"></span>
+                <span class="label">HTTP Server (9848)</span>
+                <span class="value" id="http-status">Running</span>
+            </div>
+            <div class="status-row">
+                <span class="status-indicator success" id="cert-indicator"></span>
+                <span class="label">Certificate</span>
+                <span class="value" id="cert-status">Valid</span>
+            </div>
+        </section>
 
-        <p class="minimize-hint">
-            You can minimize this window.<br>
-            The helper will continue running in the system tray.
-        </p>
+        <!-- Windows Certificate Install Section -->
+        <div id="cert-install-section" class="cert-install-section hidden">
+            <h3>
+                <span class="status-indicator warning" id="trust-indicator"></span>
+                <span id="trust-title">Edge Certificate</span>
+            </h3>
+            <p id="trust-description">Install the certificate to enable HTTPS in Microsoft Edge</p>
+            <div class="actions" style="margin: 0;">
+                <button class="btn btn-warning" id="install-cert-btn" onclick="installCertificate(false)">
+                    Install Certificate
+                </button>
+                <button class="btn btn-secondary hidden" id="install-admin-btn" onclick="installCertificate(true)">
+                    Install (Admin)
+                </button>
+            </div>
+        </div>
+
+        <section class="card">
+            <h2>Printers <span class="badge" id="printer-count">0 found</span></h2>
+            <div id="printer-list">
+                <div class="printer-item">
+                    <span class="name">Loading...</span>
+                </div>
+            </div>
+        </section>
+
+        <div class="actions">
+            <button class="btn btn-primary" id="test-btn" onclick="testConnection()">Test Connection</button>
+            <button class="btn btn-secondary" id="refresh-btn" onclick="refreshAll()">Refresh</button>
+            <button class="btn btn-secondary" onclick="copyDiagnostics()">Copy All</button>
+        </div>
+
+        <p class="hint">Minimize to system tray to keep running in background</p>
     </div>
+
+    <!-- NETWORK TAB -->
+    <div class="tab-content" id="tab-network">
+        <section class="card">
+            <h2>Connection Tests</h2>
+            <div class="status-row">
+                <span class="status-indicator" id="net-https-indicator"></span>
+                <span class="label">HTTPS (9847)</span>
+                <span class="value" id="net-https-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-indicator" id="net-http-indicator"></span>
+                <span class="label">HTTP (9848)</span>
+                <span class="value" id="net-http-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-indicator" id="net-localhost-indicator"></span>
+                <span class="label">Localhost DNS</span>
+                <span class="value" id="net-localhost-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-indicator" id="net-loopback-indicator"></span>
+                <span class="label">Loopback</span>
+                <span class="value" id="net-loopback-status">--</span>
+            </div>
+        </section>
+
+        <div class="actions">
+            <button class="btn btn-primary" onclick="runNetworkTest()">Run Full Test</button>
+        </div>
+
+        <section class="card">
+            <h2>Browser Test URLs</h2>
+            <p style="font-size: 0.7rem; opacity: 0.7; margin-bottom: 0.5rem;">
+                Copy and paste into your browser to test connectivity:
+            </p>
+            <div class="copy-url">
+                <span>https://localhost:9847/ping</span>
+                <button onclick="copyToClipboard('https://localhost:9847/ping')">Copy</button>
+            </div>
+            <div class="copy-url">
+                <span>http://localhost:9848/ping</span>
+                <button onclick="copyToClipboard('http://localhost:9848/ping')">Copy</button>
+            </div>
+        </section>
+    </div>
+
+    <!-- CERTIFICATE TAB -->
+    <div class="tab-content" id="tab-certificate">
+        <section class="card">
+            <h2>Certificate Details</h2>
+            <div class="status-row">
+                <span class="label">Status</span>
+                <span class="value" id="cert-detail-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Path</span>
+                <span class="value" id="cert-detail-path" style="font-size: 0.6rem;">--</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Created</span>
+                <span class="value" id="cert-detail-created">--</span>
+            </div>
+            <div class="status-row">
+                <span class="label">Size</span>
+                <span class="value" id="cert-detail-size">--</span>
+            </div>
+        </section>
+
+        <section class="card" id="windows-trust-section">
+            <h2>Windows Trust Store</h2>
+            <div class="status-row">
+                <span class="status-indicator" id="store-indicator"></span>
+                <span class="label">Installation Status</span>
+                <span class="value" id="store-status">--</span>
+            </div>
+            <div class="actions" style="margin-top: 0.5rem;">
+                <button class="btn btn-warning" onclick="installCertificate(false)">Install to Store</button>
+                <button class="btn btn-secondary" onclick="installCertificate(true)">Install (Admin)</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Actions</h2>
+            <div class="actions" style="margin: 0;">
+                <button class="btn-small" onclick="openCertFolder()">Open Folder</button>
+                <button class="btn-small" onclick="regenerateCert()">Regenerate</button>
+            </div>
+        </section>
+    </div>
+
+    <!-- LOGS TAB -->
+    <div class="tab-content" id="tab-logs">
+        <div class="log-filters">
+            <span class="log-filter active" data-level="all">All</span>
+            <span class="log-filter" data-level="INFO">INFO</span>
+            <span class="log-filter" data-level="WARN">WARN</span>
+            <span class="log-filter" data-level="ERROR">ERROR</span>
+            <span class="log-filter" data-level="DEBUG">DEBUG</span>
+        </div>
+
+        <div class="log-container" id="log-container">
+            <div class="log-entry">
+                <span class="time">--:--:--</span>
+                <span class="level INFO">INFO</span>
+                <span class="message">Waiting for logs...</span>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button class="btn-small" onclick="clearLogs()">Clear</button>
+            <button class="btn-small" onclick="copyLogs()">Copy Logs</button>
+            <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; opacity: 0.7;">
+                <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+            </label>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script type="module">
+        const { invoke } = window.__TAURI__.core;
+
+        // State
+        let currentLogFilter = 'all';
+        let isWindows = false;
+
+        // Elements
+        const elements = {
+            version: document.getElementById('version'),
+            overallStatus: document.getElementById('overall-status'),
+            statusText: document.getElementById('status-text'),
+            httpsIndicator: document.getElementById('https-indicator'),
+            httpsStatus: document.getElementById('https-status'),
+            httpIndicator: document.getElementById('http-indicator'),
+            httpStatus: document.getElementById('http-status'),
+            certIndicator: document.getElementById('cert-indicator'),
+            certStatus: document.getElementById('cert-status'),
+            printerCount: document.getElementById('printer-count'),
+            printerList: document.getElementById('printer-list'),
+            certInstallSection: document.getElementById('cert-install-section'),
+            trustIndicator: document.getElementById('trust-indicator'),
+            trustTitle: document.getElementById('trust-title'),
+            trustDescription: document.getElementById('trust-description'),
+            installCertBtn: document.getElementById('install-cert-btn'),
+            installAdminBtn: document.getElementById('install-admin-btn'),
+            testBtn: document.getElementById('test-btn'),
+            logContainer: document.getElementById('log-container'),
+            toast: document.getElementById('toast'),
+        };
+
+        // Toast notification
+        function showToast(message, duration = 3000) {
+            elements.toast.textContent = message;
+            elements.toast.classList.add('show');
+            setTimeout(() => elements.toast.classList.remove('show'), duration);
+        }
+
+        // Update indicator color
+        function setIndicator(element, status) {
+            if (!element) return;
+            element.classList.remove('success', 'warning', 'error');
+            element.classList.add(status);
+        }
+
+        // Update overall status badge
+        function setOverallStatus(status, text) {
+            elements.overallStatus.classList.remove('ready', 'warning', 'error');
+            elements.overallStatus.classList.add(status);
+            elements.statusText.textContent = text;
+        }
+
+        // Copy to clipboard
+        window.copyToClipboard = async function(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast('Copied to clipboard');
+            } catch (e) {
+                showToast('Failed to copy');
+            }
+        };
+
+        // Refresh diagnostics
+        async function refreshDiagnostics() {
+            try {
+                const diagnostics = await invoke('get_diagnostics');
+
+                elements.version.textContent = 'v' + diagnostics.version;
+
+                setIndicator(elements.httpsIndicator, diagnostics.https_running ? 'success' : 'error');
+                elements.httpsStatus.textContent = diagnostics.https_running ? 'Running' : 'Stopped';
+
+                setIndicator(elements.httpIndicator, diagnostics.http_running ? 'success' : 'error');
+                elements.httpStatus.textContent = diagnostics.http_running ? 'Running' : 'Stopped';
+
+                const certOk = diagnostics.cert_exists && diagnostics.cert_valid;
+                setIndicator(elements.certIndicator, certOk ? 'success' : 'warning');
+                elements.certStatus.textContent = certOk ? 'Valid' : 'Invalid';
+
+                // Overall status
+                if (diagnostics.overall_status === 'Ready') {
+                    setOverallStatus('ready', 'Ready to Print');
+                } else if (diagnostics.overall_status === 'Warning') {
+                    setOverallStatus('warning', 'Needs Attention');
+                } else {
+                    setOverallStatus('error', 'Not Working');
+                }
+
+                // Windows certificate trust section
+                if (isWindows) {
+                    updateCertTrustSection(diagnostics.cert_trusted);
+                }
+            } catch (error) {
+                console.error('Failed to get diagnostics:', error);
+                setOverallStatus('error', 'Error');
+            }
+        }
+
+        // Update Windows certificate trust section
+        function updateCertTrustSection(isTrusted) {
+            elements.certInstallSection.classList.remove('hidden', 'trusted');
+
+            if (isTrusted) {
+                elements.certInstallSection.classList.add('trusted');
+                setIndicator(elements.trustIndicator, 'success');
+                elements.trustTitle.textContent = 'Certificate Trusted';
+                elements.trustDescription.textContent = 'HTTPS is enabled for Microsoft Edge';
+                elements.installCertBtn.textContent = 'Installed';
+                elements.installCertBtn.disabled = true;
+            } else {
+                setIndicator(elements.trustIndicator, 'warning');
+                elements.trustTitle.textContent = 'Edge Certificate Not Installed';
+                elements.trustDescription.textContent = 'Click to install certificate for HTTPS in Edge';
+                elements.installCertBtn.textContent = 'Install Certificate';
+                elements.installCertBtn.disabled = false;
+            }
+
+            // Update certificate tab
+            const storeIndicator = document.getElementById('store-indicator');
+            const storeStatus = document.getElementById('store-status');
+            if (storeIndicator && storeStatus) {
+                setIndicator(storeIndicator, isTrusted ? 'success' : 'warning');
+                storeStatus.textContent = isTrusted ? 'Installed' : 'Not Installed';
+            }
+        }
+
+        // Refresh printers
+        async function refreshPrinters() {
+            try {
+                const printers = await invoke('get_printers');
+
+                elements.printerCount.textContent = printers.length + ' found';
+
+                if (printers.length === 0) {
+                    elements.printerList.innerHTML = '<div class="printer-item"><span class="name">No printers found</span></div>';
+                    return;
+                }
+
+                elements.printerList.innerHTML = printers.map(p => `
+                    <div class="printer-item">
+                        <span class="name">${p.name}</span>
+                        ${p.isDefault ? '<span class="default-star">★</span>' : ''}
+                        <span class="status">${p.status}</span>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Failed to get printers:', error);
+                elements.printerList.innerHTML = '<div class="printer-item"><span class="name">Error loading</span></div>';
+            }
+        }
+
+        // Refresh certificate info
+        async function refreshCertInfo() {
+            try {
+                const info = await invoke('get_certificate_info');
+
+                document.getElementById('cert-detail-status').textContent = info.exists ? 'Exists' : 'Missing';
+                document.getElementById('cert-detail-path').textContent = info.path || '--';
+                document.getElementById('cert-detail-created').textContent = info.created || '--';
+                document.getElementById('cert-detail-size').textContent = info.file_size_bytes ? `${info.file_size_bytes} bytes` : '--';
+            } catch (error) {
+                console.error('Failed to get cert info:', error);
+            }
+        }
+
+        // Test connection
+        window.testConnection = async function() {
+            elements.testBtn.disabled = true;
+            elements.testBtn.textContent = 'Testing...';
+
+            try {
+                const result = await invoke('test_connection');
+                showToast(result.message);
+            } catch (error) {
+                showToast('Test failed: ' + error);
+            } finally {
+                elements.testBtn.disabled = false;
+                elements.testBtn.textContent = 'Test Connection';
+            }
+        };
+
+        // Run network test
+        window.runNetworkTest = async function() {
+            try {
+                const result = await invoke('test_connection');
+
+                setIndicator(document.getElementById('net-https-indicator'), result.https_ok ? 'success' : 'error');
+                document.getElementById('net-https-status').textContent = result.https_ok ? `OK (${result.https_latency_ms}ms)` : 'Failed';
+
+                setIndicator(document.getElementById('net-http-indicator'), result.http_ok ? 'success' : 'error');
+                document.getElementById('net-http-status').textContent = result.http_ok ? `OK (${result.http_latency_ms}ms)` : 'Failed';
+
+                setIndicator(document.getElementById('net-localhost-indicator'), result.localhost_resolves ? 'success' : 'error');
+                document.getElementById('net-localhost-status').textContent = result.localhost_resolves ? 'Resolves' : 'Failed';
+
+                setIndicator(document.getElementById('net-loopback-indicator'), result.loopback_accessible ? 'success' : 'error');
+                document.getElementById('net-loopback-status').textContent = result.loopback_accessible ? 'Accessible' : 'Blocked';
+
+                showToast(result.message);
+            } catch (error) {
+                showToast('Network test failed: ' + error);
+            }
+        };
+
+        // Install certificate
+        window.installCertificate = async function(useAdmin) {
+            const btn = useAdmin ? elements.installAdminBtn : elements.installCertBtn;
+            const originalText = btn.textContent;
+
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Installing...';
+
+                await invoke('install_certificate', { useAdmin });
+
+                showToast('Certificate installed! Restart your browser.');
+                await refreshDiagnostics();
+            } catch (error) {
+                btn.textContent = originalText;
+                btn.disabled = false;
+
+                if (!useAdmin) {
+                    elements.installAdminBtn.classList.remove('hidden');
+                    showToast('Try "Install (Admin)" for system-wide installation');
+                } else {
+                    showToast('Installation failed: ' + error);
+                }
+            }
+        };
+
+        // Open cert folder
+        window.openCertFolder = async function() {
+            try {
+                await invoke('open_cert_folder');
+            } catch (error) {
+                showToast('Could not open folder: ' + error);
+            }
+        };
+
+        // Regenerate certificate
+        window.regenerateCert = async function() {
+            if (!confirm('This will delete the current certificate. You will need to restart the app. Continue?')) {
+                return;
+            }
+            try {
+                const message = await invoke('regenerate_certificate');
+                showToast(message);
+            } catch (error) {
+                showToast('Error: ' + error);
+            }
+        };
+
+        // Refresh all
+        window.refreshAll = async function() {
+            await Promise.all([
+                refreshDiagnostics(),
+                refreshPrinters(),
+                refreshCertInfo()
+            ]);
+            showToast('Refreshed');
+        };
+
+        // Copy diagnostics
+        window.copyDiagnostics = async function() {
+            try {
+                const text = await invoke('copy_diagnostics');
+                await navigator.clipboard.writeText(text);
+                showToast('Diagnostics copied to clipboard');
+            } catch (error) {
+                showToast('Failed to copy: ' + error);
+            }
+        };
+
+        // Logs
+        async function refreshLogs() {
+            try {
+                const level = currentLogFilter === 'all' ? null : currentLogFilter;
+                const logs = await invoke('get_recent_logs', { count: 100, level });
+
+                if (logs.length === 0) {
+                    elements.logContainer.innerHTML = '<div class="log-entry"><span class="message">No logs yet</span></div>';
+                    return;
+                }
+
+                elements.logContainer.innerHTML = logs.reverse().map(log => `
+                    <div class="log-entry">
+                        <span class="time">${log.timestamp}</span>
+                        <span class="level ${log.level}">${log.level}</span>
+                        <span class="message">${log.message}</span>
+                    </div>
+                `).join('');
+
+                if (document.getElementById('auto-scroll').checked) {
+                    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+                }
+            } catch (error) {
+                console.error('Failed to get logs:', error);
+            }
+        }
+
+        window.clearLogs = async function() {
+            try {
+                await invoke('clear_logs');
+                elements.logContainer.innerHTML = '<div class="log-entry"><span class="message">Logs cleared</span></div>';
+            } catch (error) {
+                showToast('Failed to clear logs');
+            }
+        };
+
+        window.copyLogs = async function() {
+            const text = elements.logContainer.innerText;
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast('Logs copied');
+            } catch (e) {
+                showToast('Failed to copy');
+            }
+        };
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+
+                // Refresh data when switching tabs
+                if (tab.dataset.tab === 'logs') refreshLogs();
+                if (tab.dataset.tab === 'network') runNetworkTest();
+                if (tab.dataset.tab === 'certificate') refreshCertInfo();
+            });
+        });
+
+        // Log filter
+        document.querySelectorAll('.log-filter').forEach(filter => {
+            filter.addEventListener('click', () => {
+                document.querySelectorAll('.log-filter').forEach(f => f.classList.remove('active'));
+                filter.classList.add('active');
+                currentLogFilter = filter.dataset.level;
+                refreshLogs();
+            });
+        });
+
+        // Initialize
+        async function init() {
+            try {
+                const platform = await invoke('get_platform');
+                isWindows = platform === 'windows';
+
+                // Show Windows-specific sections
+                if (!isWindows) {
+                    elements.certInstallSection.classList.add('hidden');
+                    document.getElementById('windows-trust-section').classList.add('hidden');
+                }
+
+                await refreshAll();
+            } catch (e) {
+                console.error('Init error:', e);
+            }
+        }
+
+        init();
+
+        // Auto-refresh every 5 seconds
+        setInterval(refreshDiagnostics, 5000);
+        setInterval(refreshLogs, 3000);
+    </script>
 </body>
 </html>
