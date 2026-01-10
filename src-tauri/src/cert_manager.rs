@@ -2,9 +2,23 @@
 //! Handles checking if cert is trusted and installing to Windows stores
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 use std::process::Command;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// Windows flag to hide console window
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Cache for certificate trust status (avoid constant PowerShell calls)
+static CERT_TRUST_CACHE: AtomicBool = AtomicBool::new(false);
+static CERT_TRUST_CACHE_TIME: AtomicU64 = AtomicU64::new(0);
+const CACHE_TTL_SECS: u64 = 30; // Only check every 30 seconds
 
 /// Get the path to the certificate directory
 pub fn get_cert_dir() -> PathBuf {
@@ -19,22 +33,50 @@ pub fn get_cert_path() -> PathBuf {
     get_cert_dir().join("localhost.crt")
 }
 
+/// Invalidate the certificate trust cache (call after installation)
+pub fn invalidate_cert_cache() {
+    CERT_TRUST_CACHE_TIME.store(0, Ordering::Relaxed);
+}
+
 /// Check if the localhost certificate is installed in the Windows trusted root store
+/// Checks BOTH CurrentUser\Root AND LocalMachine\Root stores
+/// Results are cached for 30 seconds to avoid PowerShell spam
 #[cfg(target_os = "windows")]
 pub fn is_cert_trusted() -> Result<bool, String> {
+    // Check cache first
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cached_time = CERT_TRUST_CACHE_TIME.load(Ordering::Relaxed);
+
+    if now.saturating_sub(cached_time) < CACHE_TTL_SECS {
+        return Ok(CERT_TRUST_CACHE.load(Ordering::Relaxed));
+    }
+
+    // Check BOTH certificate stores
     let ps_script = r#"
-$certs = Get-ChildItem -Path Cert:\CurrentUser\Root | Where-Object { $_.Subject -like "*localhost*" }
-if ($certs) { "true" } else { "false" }
+$currentUser = Get-ChildItem -Path Cert:\CurrentUser\Root -ErrorAction SilentlyContinue | Where-Object { $_.Subject -like "*localhost*" }
+$localMachine = Get-ChildItem -Path Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Where-Object { $_.Subject -like "*localhost*" }
+if ($currentUser -or $localMachine) { "true" } else { "false" }
 "#;
 
     let output = Command::new("powershell")
         .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
     tracing::debug!("Certificate trust check result: {}", stdout);
-    Ok(stdout == "true")
+
+    let result = stdout == "true";
+
+    // Update cache
+    CERT_TRUST_CACHE.store(result, Ordering::Relaxed);
+    CERT_TRUST_CACHE_TIME.store(now, Ordering::Relaxed);
+
+    Ok(result)
 }
 
 /// Install certificate to CurrentUser trusted root store (no admin required)
@@ -87,6 +129,7 @@ try {{
 
     let output = Command::new("powershell")
         .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", &ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
 
@@ -98,6 +141,8 @@ try {{
 
     if output.status.success() && stdout.contains("SUCCESS") {
         tracing::info!("Certificate installed successfully to CurrentUser store");
+        // Invalidate cache so next check reflects the new state
+        invalidate_cert_cache();
         Ok(())
     } else {
         let error_msg = if stderr.is_empty() { stdout.to_string() } else { stderr.to_string() };
@@ -133,7 +178,7 @@ try {{
     $store.Open("ReadWrite")
     $store.Add($cert)
     $store.Close()
-    [System.Windows.Forms.MessageBox]::Show("Certificate installed successfully! Please restart your browser.", "AnyMobile Print Helper", "OK", "Information")
+    [System.Windows.Forms.MessageBox]::Show("Certificate installed! Close ALL Edge windows and reopen for changes to take effect.", "AnyMobile Print Helper", "OK", "Information")
 }} catch {{
     [System.Windows.Forms.MessageBox]::Show("Installation failed: $_", "Error", "OK", "Error")
 }}
@@ -147,7 +192,7 @@ try {{
 
     tracing::info!("Running elevated certificate installation");
 
-    // Run with elevation
+    // Run with elevation (this one needs to show UAC prompt, so no CREATE_NO_WINDOW)
     let output = Command::new("powershell")
         .args([
             "-Command",
@@ -156,6 +201,7 @@ try {{
                 script_path.to_string_lossy()
             )
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to run elevated PowerShell: {}", e))?;
 
@@ -164,6 +210,8 @@ try {{
 
     if output.status.success() {
         tracing::info!("Elevated certificate installation completed");
+        // Invalidate cache so next check reflects the new state
+        invalidate_cert_cache();
         Ok(())
     } else {
         Err("User cancelled or installation failed".to_string())
@@ -192,12 +240,14 @@ try {
 
     let output = Command::new("powershell")
         .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     if stdout.contains("SUCCESS") {
+        invalidate_cert_cache();
         Ok(())
     } else {
         Err(format!("Failed to remove certificate: {}", stdout))

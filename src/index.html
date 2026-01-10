@@ -752,7 +752,7 @@
 
                 await invoke('install_certificate', { useAdmin });
 
-                showToast('Certificate installed! Restart your browser.');
+                showToast('Certificate installed! Close ALL Edge windows and reopen.');
                 await refreshDiagnostics();
             } catch (error) {
                 btn.textContent = originalText;

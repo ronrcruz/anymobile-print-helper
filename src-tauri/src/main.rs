@@ -122,8 +122,8 @@ fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    // Initialize logging with custom layer that captures to in-memory buffer
+    diagnostics::init_tracing();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

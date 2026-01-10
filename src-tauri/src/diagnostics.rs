@@ -5,7 +5,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::fmt::Write as FmtWrite;
 use once_cell::sync::Lazy;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use crate::cert_manager;
 use crate::server::{HTTPS_PORT, HTTP_PORT, PrinterInfo};
@@ -127,6 +131,82 @@ pub fn clear_logs() {
     if let Ok(mut buffer) = LOG_BUFFER.write() {
         buffer.clear();
     }
+}
+
+// ============================================================================
+// Custom Tracing Layer - forwards logs to LOG_BUFFER
+// ============================================================================
+
+/// Custom tracing layer that captures log events and adds them to the in-memory buffer
+pub struct LogBufferLayer;
+
+/// Visitor to extract the message field from tracing events
+struct MessageVisitor {
+    message: String,
+}
+
+impl MessageVisitor {
+    fn new() -> Self {
+        Self { message: String::new() }
+    }
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(&mut self.message, "{:?}", value);
+            // Remove surrounding quotes if present
+            if self.message.starts_with('"') && self.message.ends_with('"') && self.message.len() > 1 {
+                self.message = self.message[1..self.message.len()-1].to_string();
+            }
+        } else if self.message.is_empty() {
+            // Fall back to first field if no "message" field
+            let _ = write!(&mut self.message, "{:?}", value);
+            if self.message.starts_with('"') && self.message.ends_with('"') && self.message.len() > 1 {
+                self.message = self.message[1..self.message.len()-1].to_string();
+            }
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" || self.message.is_empty() {
+            self.message = value.to_string();
+        }
+    }
+}
+
+impl<S> Layer<S> for LogBufferLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let metadata = event.metadata();
+        let level = metadata.level().to_string().to_uppercase();
+        let target = metadata.target();
+
+        // Extract the source (last component of target)
+        let source = target.split("::").last().unwrap_or(target);
+
+        // Extract the message using our visitor
+        let mut visitor = MessageVisitor::new();
+        event.record(&mut visitor);
+
+        let message = if visitor.message.is_empty() {
+            format!("[{}]", target)
+        } else {
+            visitor.message
+        };
+
+        add_log_entry(&level, source, &message);
+    }
+}
+
+/// Initialize the tracing subscriber with both fmt output and log buffer capture
+pub fn init_tracing() {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(LogBufferLayer)
+        .init();
 }
 
 /// Get full diagnostic status
