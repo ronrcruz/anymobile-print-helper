@@ -170,8 +170,9 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
 }
 
 /// Handle /ping - health check and version info
+/// NOTE: Does NOT list printers here - that's slow on Windows (4+ seconds via PowerShell).
+/// Use /printers endpoint separately after detection succeeds.
 async fn handle_ping(State(state): State<Arc<ServerState>>) -> Json<PingResponse> {
-    let printers = printer::list_printers().unwrap_or_default();
     let version = state
         .app_handle
         .package_info()
@@ -181,7 +182,7 @@ async fn handle_ping(State(state): State<Arc<ServerState>>) -> Json<PingResponse
     Json(PingResponse {
         app: "anymobile-print-helper",
         version,
-        printers,
+        printers: vec![], // Empty - fetch via /printers separately
     })
 }
 
