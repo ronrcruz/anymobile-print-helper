@@ -187,6 +187,190 @@ async fn ensure_sumatra_available() -> Result<PathBuf, Box<dyn std::error::Error
     Ok(sumatra_path)
 }
 
+/// Configure printer for high-quality label printing (600 DPI, Matte paper)
+/// This modifies the printer's DEVMODE settings before SumatraPDF prints
+#[cfg(target_os = "windows")]
+fn configure_printer_quality(printer_name: &str) -> Result<(), String> {
+    tracing::info!("Configuring printer quality for: {}", printer_name);
+
+    // PowerShell script that:
+    // 1. Queries supported media types from the printer
+    // 2. Finds "Matte" or "Premium" paper type
+    // 3. Sets 600 DPI and the discovered media type via DEVMODE
+    let ps_script = format!(r#"
+$ErrorActionPreference = 'Stop'
+$printerName = '{}'
+
+# Add .NET types for printer configuration
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public class PrinterConfig {{
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool OpenPrinter(string pPrinterName, out IntPtr hPrinter, IntPtr pDefault);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
+    public static extern int DocumentProperties(IntPtr hwnd, IntPtr hPrinter, string pDeviceName,
+        IntPtr pDevModeOutput, IntPtr pDevModeInput, int fMode);
+
+    [DllImport("winspool.drv", SetLastError = true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
+    public static extern int DeviceCapabilities(string pDevice, string pPort,
+        ushort fwCapability, IntPtr pOutput, IntPtr pDevMode);
+}}
+'@
+
+# DeviceCapabilities constants
+$DC_MEDIATYPES = 35
+$DC_MEDIATYPENAMES = 36
+
+# DEVMODE field offsets (64-bit Windows)
+$dmFields_offset = 40
+$dmPrintQuality_offset = 58
+$dmYResolution_offset = 60
+$dmMediaType_offset = 62
+
+# DEVMODE field flags
+$DM_PRINTQUALITY = 0x0400
+$DM_YRESOLUTION = 0x2000
+$DM_MEDIATYPE = 0x0200
+
+# Step 1: Query supported media types
+$mediaTypeId = 0  # Default to plain paper
+$count = [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
+
+if ($count -gt 0) {{
+    Write-Host "Found $count media types"
+
+    # Allocate buffers for IDs (4 bytes each) and names (64 chars * 2 bytes = 128 bytes each)
+    $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
+    $nameBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 128)
+
+    try {{
+        [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
+        [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPENAMES, $nameBuffer, [IntPtr]::Zero) | Out-Null
+
+        # Find best match: Premium Matte > Presentation Matte > Matte > any
+        $bestMatch = $null
+        $bestPriority = 0
+
+        for ($i = 0; $i -lt $count; $i++) {{
+            $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
+            $namePtr = [IntPtr]::Add($nameBuffer, $i * 128)
+            $name = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($namePtr, 64).TrimEnd([char]0)
+
+            Write-Host "  Media type $i : ID=$id, Name='$name'"
+
+            # Priority matching
+            if ($name -match "Premium.*Presentation.*Matte" -and $bestPriority -lt 4) {{
+                $bestMatch = $id
+                $bestPriority = 4
+                Write-Host "    -> Best match (priority 4)"
+            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 3) {{
+                $bestMatch = $id
+                $bestPriority = 3
+                Write-Host "    -> Match (priority 3)"
+            }} elseif ($name -match "Presentation.*Matte" -and $bestPriority -lt 2) {{
+                $bestMatch = $id
+                $bestPriority = 2
+                Write-Host "    -> Match (priority 2)"
+            }} elseif ($name -match "Matte" -and $bestPriority -lt 1) {{
+                $bestMatch = $id
+                $bestPriority = 1
+                Write-Host "    -> Match (priority 1)"
+            }}
+        }}
+
+        if ($bestMatch -ne $null) {{
+            $mediaTypeId = $bestMatch
+            Write-Host "Selected media type ID: $mediaTypeId"
+        }} else {{
+            Write-Host "No matte paper found, using default (0)"
+        }}
+    }} finally {{
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
+    }}
+}}
+
+# Step 2: Open printer and modify DEVMODE
+$hPrinter = [IntPtr]::Zero
+if ([PrinterConfig]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {{
+    try {{
+        # Get DEVMODE size
+        $size = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, [IntPtr]::Zero, [IntPtr]::Zero, 0)
+        Write-Host "DEVMODE size: $size bytes"
+
+        if ($size -gt 0) {{
+            $pDevMode = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+
+            try {{
+                # Get current DEVMODE (DM_OUT_BUFFER = 2)
+                $result = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, [IntPtr]::Zero, 2)
+
+                if ($result -ge 0) {{
+                    # Read and modify dmFields
+                    $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, $dmFields_offset)
+                    $dmFields = $dmFields -bor $DM_PRINTQUALITY -bor $DM_YRESOLUTION -bor $DM_MEDIATYPE
+                    [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, $dmFields_offset, $dmFields)
+
+                    # Set 600 DPI
+                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmPrintQuality_offset, 600)
+                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmYResolution_offset, 600)
+
+                    # Set media type
+                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmMediaType_offset, $mediaTypeId)
+
+                    # Apply settings (DM_IN_BUFFER | DM_OUT_BUFFER = 10)
+                    $result = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, $pDevMode, 10)
+
+                    if ($result -eq 1) {{
+                        Write-Host "SUCCESS: Configured 600 DPI, MediaType=$mediaTypeId"
+                    }} else {{
+                        Write-Host "WARNING: DocumentProperties returned $result (settings may not persist)"
+                    }}
+                }} else {{
+                    Write-Host "ERROR: Failed to get DEVMODE (result=$result)"
+                }}
+            }} finally {{
+                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pDevMode)
+            }}
+        }}
+    }} finally {{
+        [PrinterConfig]::ClosePrinter($hPrinter) | Out-Null
+    }}
+}} else {{
+    Write-Host "ERROR: Could not open printer '$printerName'"
+}}
+"#, printer_name);
+
+    let output = Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", &ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("PowerShell failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    tracing::info!("Printer config output:\n{}", stdout);
+    if !stderr.is_empty() {
+        tracing::warn!("Printer config stderr:\n{}", stderr);
+    }
+
+    if stdout.contains("SUCCESS") {
+        Ok(())
+    } else if stdout.contains("WARNING") {
+        // Settings applied but may not persist - continue anyway
+        Ok(())
+    } else {
+        Err(format!("Failed to configure printer: {}", stdout))
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn print_pdf_windows(
     pdf_path: &str,
@@ -215,6 +399,15 @@ async fn print_pdf_windows(
     };
 
     tracing::info!("Using printer: {}", printer);
+
+    // Configure high-quality settings for Epson printers
+    if printer.to_lowercase().contains("epson") {
+        tracing::info!("Detected Epson printer - configuring for high-quality label printing...");
+        match configure_printer_quality(&printer) {
+            Ok(()) => tracing::info!("Printer configured successfully"),
+            Err(e) => tracing::warn!("Could not configure printer quality: {}. Continuing with defaults.", e),
+        }
+    }
 
     // Build print settings for SumatraPDF
     // noscale = actual size (no fit-to-page)
