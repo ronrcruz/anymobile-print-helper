@@ -4,7 +4,15 @@ use crate::server::PrinterInfo;
 use std::process::Command;
 use tempfile::NamedTempFile;
 use std::io::Write;
+use std::path::PathBuf;
 use uuid::Uuid;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// Windows flag to hide console window
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// List available printers on the system
 pub fn list_printers() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> {
@@ -131,89 +139,119 @@ fn list_printers_windows() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error
     Ok(printers)
 }
 
+/// Get the path where SumatraPDF should be stored
+#[cfg(target_os = "windows")]
+fn get_sumatra_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("anymobile-print-helper")
+        .join("tools")
+}
+
+/// Get path to SumatraPDF executable
+#[cfg(target_os = "windows")]
+fn get_sumatra_path() -> PathBuf {
+    get_sumatra_dir().join("SumatraPDF.exe")
+}
+
+/// Download SumatraPDF if not present
+#[cfg(target_os = "windows")]
+async fn ensure_sumatra_available() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let sumatra_path = get_sumatra_path();
+
+    if sumatra_path.exists() {
+        tracing::info!("SumatraPDF already available at {:?}", sumatra_path);
+        return Ok(sumatra_path);
+    }
+
+    tracing::info!("Downloading SumatraPDF for silent printing...");
+
+    // Create directory
+    let sumatra_dir = get_sumatra_dir();
+    std::fs::create_dir_all(&sumatra_dir)?;
+
+    // Download SumatraPDF portable (64-bit)
+    // Using the official SourceForge mirror for the portable version
+    let download_url = "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe";
+
+    let response = reqwest::get(download_url).await?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to download SumatraPDF: HTTP {}", response.status()).into());
+    }
+
+    let bytes = response.bytes().await?;
+    std::fs::write(&sumatra_path, &bytes)?;
+
+    tracing::info!("SumatraPDF downloaded successfully to {:?}", sumatra_path);
+    Ok(sumatra_path)
+}
+
 #[cfg(target_os = "windows")]
 async fn print_pdf_windows(
     pdf_path: &str,
     printer_name: Option<&str>,
     copies: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("=== WINDOWS PRINT DEBUG ===");
+    tracing::info!("=== WINDOWS PRINT (SumatraPDF) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
 
-    let printer_arg = match printer_name {
-        Some(name) => format!("'{}'", name),
-        None => "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name".to_string(),
+    // Ensure SumatraPDF is available
+    let sumatra_path = ensure_sumatra_available().await?;
+
+    // Get printer name (use default if not specified)
+    let printer = match printer_name {
+        Some(name) => name.to_string(),
+        None => {
+            // Get default printer via PowerShell
+            let output = Command::new("powershell")
+                .args(["-Command", "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()?;
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
     };
 
-    // PowerShell script with verbose output for debugging
-    let ps_script = format!(r#"
-$pdfPath = '{pdf_path}'
-$printerName = {printer_arg}
-$copies = {copies}
+    tracing::info!("Using printer: {}", printer);
 
-Write-Host "=== PDF PRINT DEBUG ==="
-Write-Host "PDF Path: $pdfPath"
-Write-Host "Printer: $printerName"
-Write-Host "Copies: $copies"
+    // Build print settings for SumatraPDF
+    // noscale = actual size (no fit-to-page)
+    // For multiple copies, we call SumatraPDF multiple times
+    // SumatraPDF print settings: https://www.sumatrapdfreader.org/docs/Command-line-arguments
+    let print_settings = "noscale";
 
-# Check if PDF exists
-if (Test-Path $pdfPath) {{
-    Write-Host "PDF file exists: YES"
-}} else {{
-    Write-Host "PDF file exists: NO - THIS IS A PROBLEM!"
-}}
+    for i in 0..copies {
+        tracing::info!("Printing copy {} of {}", i + 1, copies);
 
-# Try Adobe Reader first (most reliable for exact scaling)
-$adobePaths = @(
-    "$env:ProgramFiles\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
-    "$env:ProgramFiles\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-    "${{env:ProgramFiles(x86)}}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
-    "$env:ProgramFiles\Adobe\Reader 11.0\Reader\AcroRd32.exe",
-    "${{env:ProgramFiles(x86)}}\Adobe\Reader 11.0\Reader\AcroRd32.exe"
-)
+        let output = Command::new(&sumatra_path)
+            .args([
+                "-print-to", &printer,
+                "-print-settings", print_settings,
+                "-silent",
+                pdf_path,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
 
-Write-Host "Checking for Adobe Reader..."
-$adobePath = $adobePaths | Where-Object {{ Test-Path $_ }} | Select-Object -First 1
+        tracing::info!("SumatraPDF exit status: {:?}", output.status);
 
-if ($adobePath) {{
-    Write-Host "Found Adobe Reader at: $adobePath"
-    Write-Host "Printing with Adobe Reader..."
-    for ($i = 0; $i -lt $copies; $i++) {{
-        Write-Host "Printing copy $($i + 1) of $copies"
-        Start-Process -FilePath $adobePath -ArgumentList "/t", "`"$pdfPath`"", "`"$printerName`"" -Wait
-    }}
-    Write-Host "Adobe Reader print complete"
-}} else {{
-    Write-Host "Adobe Reader NOT FOUND"
+        if !output.stdout.is_empty() {
+            tracing::debug!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        }
+        if !output.stderr.is_empty() {
+            tracing::debug!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
-    # Fallback: Use default Windows print
-    Write-Host "Using Windows default print handler..."
-    for ($i = 0; $i -lt $copies; $i++) {{
-        Write-Host "Printing copy $($i + 1) of $copies via default handler"
-        Start-Process -FilePath $pdfPath -Verb Print -Wait
-    }}
-    Write-Host "Default handler print complete"
-}}
-
-Write-Host "=== PRINT SCRIPT FINISHED ==="
-"#);
-
-    tracing::info!("Executing PowerShell print script...");
-
-    let output = Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_script])
-        .output()?;
-
-    tracing::info!("PowerShell exit status: {:?}", output.status);
-    tracing::info!("PowerShell stdout:\n{}", String::from_utf8_lossy(&output.stdout));
-    tracing::info!("PowerShell stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-
-    if !output.status.success() {
-        let err_msg = format!("Windows print failed. stderr: {}", String::from_utf8_lossy(&output.stderr));
-        tracing::error!("{}", err_msg);
-        return Err(err_msg.into());
+        if !output.status.success() {
+            let err_msg = format!(
+                "SumatraPDF print failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            tracing::error!("{}", err_msg);
+            return Err(err_msg.into());
+        }
     }
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
