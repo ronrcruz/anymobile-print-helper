@@ -156,22 +156,68 @@ fn get_ghostscript_path() -> PathBuf {
 }
 
 /// Check if Ghostscript is installed and return the path if found
+/// Checks: app local dir, Program Files, Program Files (x86), and PATH
 #[cfg(target_os = "windows")]
 fn find_ghostscript_path() -> Option<PathBuf> {
+    // 1. Check app's local directory first
     let gs_dir = get_ghostscript_dir();
 
-    // Check direct path first
-    let direct_path = gs_dir.join("bin").join("gswin64c.exe");
-    if direct_path.exists() {
-        return Some(direct_path);
+    let local_paths = [
+        gs_dir.join("bin").join("gswin64c.exe"),
+        gs_dir.join("gs10.04.0").join("bin").join("gswin64c.exe"),
+    ];
+
+    for path in &local_paths {
+        if path.exists() {
+            tracing::debug!("Found Ghostscript at app local: {:?}", path);
+            return Some(path.clone());
+        }
     }
 
-    // Check versioned subdirectory (installer creates gs10.04.0/bin/gswin64c.exe)
-    let versioned_path = gs_dir.join("gs10.04.0").join("bin").join("gswin64c.exe");
-    if versioned_path.exists() {
-        return Some(versioned_path);
+    // 2. Check Program Files (standard manual install location)
+    let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+
+    // Common Ghostscript versions to check
+    let gs_versions = ["gs10.04.0", "gs10.03.1", "gs10.03.0", "gs10.02.1", "gs10.02.0", "gs10.01.2", "gs10.00.0", "gs9.56.1", "gs9.55.0"];
+
+    for base in [&program_files, &program_files_x86] {
+        let gs_base = PathBuf::from(base).join("gs");
+
+        // Check versioned directories
+        for version in &gs_versions {
+            let path = gs_base.join(version).join("bin").join("gswin64c.exe");
+            if path.exists() {
+                tracing::debug!("Found Ghostscript at Program Files: {:?}", path);
+                return Some(path);
+            }
+            // Also check 32-bit executable
+            let path32 = gs_base.join(version).join("bin").join("gswin32c.exe");
+            if path32.exists() {
+                tracing::debug!("Found Ghostscript (32-bit) at Program Files: {:?}", path32);
+                return Some(path32);
+            }
+        }
     }
 
+    // 3. Check if gswin64c is in PATH
+    if let Ok(output) = Command::new("where")
+        .arg("gswin64c.exe")
+        .output()
+    {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = path_str.lines().next() {
+                let path = PathBuf::from(first_line.trim());
+                if path.exists() {
+                    tracing::debug!("Found Ghostscript in PATH: {:?}", path);
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    tracing::debug!("Ghostscript not found in any location");
     None
 }
 
