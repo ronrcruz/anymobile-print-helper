@@ -175,6 +175,18 @@ fn find_ghostscript_path() -> Option<PathBuf> {
     None
 }
 
+/// Check if Ghostscript is installed (sync version for UI status)
+#[cfg(target_os = "windows")]
+pub fn is_ghostscript_installed() -> bool {
+    find_ghostscript_path().is_some()
+}
+
+/// Check if Ghostscript is installed (non-Windows stub)
+#[cfg(not(target_os = "windows"))]
+pub fn is_ghostscript_installed() -> bool {
+    true // Not needed on other platforms
+}
+
 /// Download and install Ghostscript if not present
 /// Ghostscript's mswinpr2 device respects DEVMODE settings unlike SumatraPDF
 #[cfg(target_os = "windows")]

@@ -116,6 +116,28 @@ fn get_platform() -> String {
     std::env::consts::OS.to_string()
 }
 
+/// Check if Ghostscript is installed (Windows only)
+#[tauri::command]
+fn check_ghostscript_installed() -> bool {
+    printer::is_ghostscript_installed()
+}
+
+/// Install Ghostscript for high-quality printing (Windows only)
+#[tauri::command]
+async fn install_ghostscript() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        match printer::ensure_ghostscript_available().await {
+            Ok(path) => Ok(format!("Ghostscript installed successfully!")),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok("Ghostscript not needed on this platform".to_string())
+    }
+}
+
 fn main() {
     // Install rustls crypto provider (required for rustls 0.23+)
     rustls::crypto::ring::default_provider()
@@ -145,7 +167,9 @@ fn main() {
             get_recent_logs,
             clear_logs,
             copy_diagnostics,
-            get_platform
+            get_platform,
+            check_ghostscript_installed,
+            install_ghostscript
         ])
         .setup(|app| {
             // Create system tray menu
@@ -193,19 +217,6 @@ fn main() {
                     tracing::error!("Failed to start HTTP server: {}", e);
                 }
             });
-
-            // Pre-download Ghostscript on Windows for high-quality printing
-            // This happens at startup so user doesn't wait during print
-            #[cfg(target_os = "windows")]
-            {
-                tauri::async_runtime::spawn(async {
-                    tracing::info!("Checking Ghostscript availability for high-quality printing...");
-                    match printer::ensure_ghostscript_available().await {
-                        Ok(path) => tracing::info!("Ghostscript ready at: {:?}", path),
-                        Err(e) => tracing::warn!("Ghostscript setup failed: {}. Will use SumatraPDF as fallback.", e),
-                    }
-                });
-            }
 
             // Hide window on startup if minimized flag is set
             if std::env::args().any(|arg| arg == "--minimized") {

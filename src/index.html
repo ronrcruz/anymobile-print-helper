@@ -383,19 +383,16 @@
             </div>
         </section>
 
-        <!-- Windows Certificate Install Section -->
-        <div id="cert-install-section" class="cert-install-section hidden">
+        <!-- Windows Ghostscript Install Section (for high-quality printing) -->
+        <div id="ghostscript-section" class="cert-install-section hidden">
             <h3>
-                <span class="status-indicator warning" id="trust-indicator"></span>
-                <span id="trust-title">Edge Certificate</span>
+                <span class="status-indicator warning" id="gs-indicator"></span>
+                <span id="gs-title">Print Quality Enhancement</span>
             </h3>
-            <p id="trust-description">Install the certificate to enable HTTPS in Microsoft Edge</p>
+            <p id="gs-description">Install Ghostscript for high-quality label printing</p>
             <div class="actions" style="margin: 0;">
-                <button class="btn btn-warning" id="install-cert-btn" onclick="installCertificate(false)">
-                    Install Certificate
-                </button>
-                <button class="btn btn-secondary hidden" id="install-admin-btn" onclick="installCertificate(true)">
-                    Install (Admin)
+                <button class="btn btn-warning" id="install-gs-btn" onclick="installGhostscript()">
+                    Install Ghostscript
                 </button>
             </div>
         </div>
@@ -557,12 +554,11 @@
             certStatus: document.getElementById('cert-status'),
             printerCount: document.getElementById('printer-count'),
             printerList: document.getElementById('printer-list'),
-            certInstallSection: document.getElementById('cert-install-section'),
-            trustIndicator: document.getElementById('trust-indicator'),
-            trustTitle: document.getElementById('trust-title'),
-            trustDescription: document.getElementById('trust-description'),
-            installCertBtn: document.getElementById('install-cert-btn'),
-            installAdminBtn: document.getElementById('install-admin-btn'),
+            ghostscriptSection: document.getElementById('ghostscript-section'),
+            gsIndicator: document.getElementById('gs-indicator'),
+            gsTitle: document.getElementById('gs-title'),
+            gsDescription: document.getElementById('gs-description'),
+            installGsBtn: document.getElementById('install-gs-btn'),
             testBtn: document.getElementById('test-btn'),
             logContainer: document.getElementById('log-container'),
             toast: document.getElementById('toast'),
@@ -625,9 +621,9 @@
                     setOverallStatus('error', 'Not Working');
                 }
 
-                // Windows certificate trust section
+                // Check Ghostscript status on Windows
                 if (isWindows) {
-                    updateCertTrustSection(diagnostics.cert_trusted);
+                    await checkGhostscriptStatus();
                 }
             } catch (error) {
                 console.error('Failed to get diagnostics:', error);
@@ -635,33 +631,52 @@
             }
         }
 
-        // Update Windows certificate trust section
-        function updateCertTrustSection(isTrusted) {
-            elements.certInstallSection.classList.remove('hidden', 'trusted');
+        // Check and update Ghostscript status (Windows only)
+        async function checkGhostscriptStatus() {
+            if (!isWindows) return;
 
-            if (isTrusted) {
-                elements.certInstallSection.classList.add('trusted');
-                setIndicator(elements.trustIndicator, 'success');
-                elements.trustTitle.textContent = 'Certificate Trusted';
-                elements.trustDescription.textContent = 'HTTPS is enabled for Microsoft Edge';
-                elements.installCertBtn.textContent = 'Installed';
-                elements.installCertBtn.disabled = true;
-            } else {
-                setIndicator(elements.trustIndicator, 'warning');
-                elements.trustTitle.textContent = 'Edge Certificate Not Installed';
-                elements.trustDescription.textContent = 'Click to install certificate for HTTPS in Edge';
-                elements.installCertBtn.textContent = 'Install Certificate';
-                elements.installCertBtn.disabled = false;
-            }
+            try {
+                const installed = await invoke('check_ghostscript_installed');
 
-            // Update certificate tab
-            const storeIndicator = document.getElementById('store-indicator');
-            const storeStatus = document.getElementById('store-status');
-            if (storeIndicator && storeStatus) {
-                setIndicator(storeIndicator, isTrusted ? 'success' : 'warning');
-                storeStatus.textContent = isTrusted ? 'Installed' : 'Not Installed';
+                elements.ghostscriptSection.classList.remove('hidden', 'trusted');
+
+                if (installed) {
+                    elements.ghostscriptSection.classList.add('trusted');
+                    setIndicator(elements.gsIndicator, 'success');
+                    elements.gsTitle.textContent = 'High-Quality Printing Ready';
+                    elements.gsDescription.textContent = 'Ghostscript is installed for premium print quality';
+                    elements.installGsBtn.textContent = 'Installed';
+                    elements.installGsBtn.disabled = true;
+                } else {
+                    setIndicator(elements.gsIndicator, 'warning');
+                    elements.gsTitle.textContent = 'Print Quality Enhancement';
+                    elements.gsDescription.textContent = 'Install Ghostscript for high-quality label printing';
+                    elements.installGsBtn.textContent = 'Install Ghostscript';
+                    elements.installGsBtn.disabled = false;
+                }
+            } catch (e) {
+                console.error('Failed to check Ghostscript:', e);
             }
         }
+
+        // Install Ghostscript (Windows only)
+        window.installGhostscript = async function() {
+            const btn = elements.installGsBtn;
+            const originalText = btn.textContent;
+
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Installing...';
+
+                const result = await invoke('install_ghostscript');
+                showToast(result);
+                await checkGhostscriptStatus();
+            } catch (error) {
+                showToast('Installation failed: ' + error);
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
+        };
 
         // Refresh printers
         async function refreshPrinters() {
@@ -888,9 +903,14 @@
                 const platform = await invoke('get_platform');
                 isWindows = platform === 'windows';
 
-                // Show Windows-specific sections
-                if (!isWindows) {
-                    elements.certInstallSection.classList.add('hidden');
+                // Platform-specific UI
+                if (isWindows) {
+                    // Windows: Show Ghostscript section, hide certificate sections
+                    await checkGhostscriptStatus();
+                    document.getElementById('windows-trust-section').classList.add('hidden');
+                } else {
+                    // Mac/Linux: Hide Windows-specific sections
+                    elements.ghostscriptSection.classList.add('hidden');
                     document.getElementById('windows-trust-section').classList.add('hidden');
                 }
 
