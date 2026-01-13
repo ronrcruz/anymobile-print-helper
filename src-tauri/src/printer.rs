@@ -139,6 +139,90 @@ fn list_printers_windows() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error
     Ok(printers)
 }
 
+/// Get the directory where Ghostscript should be stored
+#[cfg(target_os = "windows")]
+fn get_ghostscript_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("anymobile-print-helper")
+        .join("tools")
+        .join("gs")
+}
+
+/// Get path to Ghostscript executable
+#[cfg(target_os = "windows")]
+fn get_ghostscript_path() -> PathBuf {
+    get_ghostscript_dir().join("bin").join("gswin64c.exe")
+}
+
+/// Download and install Ghostscript if not present
+/// Ghostscript's mswinpr2 device respects DEVMODE settings unlike SumatraPDF
+#[cfg(target_os = "windows")]
+async fn ensure_ghostscript_available() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let gs_path = get_ghostscript_path();
+    let gs_dll = get_ghostscript_dir().join("bin").join("gsdll64.dll");
+
+    // Check if already installed
+    if gs_path.exists() && gs_dll.exists() {
+        tracing::info!("Ghostscript already available at {:?}", gs_path);
+        return Ok(gs_path);
+    }
+
+    tracing::info!("Downloading Ghostscript for high-quality printing...");
+
+    let gs_dir = get_ghostscript_dir();
+    std::fs::create_dir_all(&gs_dir)?;
+
+    // Download Ghostscript installer (64-bit)
+    // Using the official GitHub releases from Artifex
+    let download_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10040/gs10040w64.exe";
+    let installer_path = gs_dir.join("gs_installer.exe");
+
+    tracing::info!("Downloading from: {}", download_url);
+    let response = reqwest::get(download_url).await?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to download Ghostscript: HTTP {}", response.status()).into());
+    }
+
+    let bytes = response.bytes().await?;
+    std::fs::write(&installer_path, &bytes)?;
+    tracing::info!("Downloaded installer to {:?}", installer_path);
+
+    // Run silent install to our local directory
+    // /S = silent, /D = destination directory
+    let install_target = gs_dir.to_string_lossy().to_string();
+    tracing::info!("Installing Ghostscript silently to: {}", install_target);
+
+    let output = Command::new(&installer_path)
+        .args(["/S", &format!("/D={}", install_target)])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    tracing::info!("Installer exit status: {:?}", output.status);
+
+    // Wait a moment for installation to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Clean up installer
+    let _ = std::fs::remove_file(&installer_path);
+
+    // Verify installation
+    if gs_path.exists() {
+        tracing::info!("Ghostscript installed successfully to {:?}", gs_path);
+        Ok(gs_path)
+    } else {
+        // Check if it installed to a versioned subdirectory
+        let versioned_path = gs_dir.join("gs10.04.0").join("bin").join("gswin64c.exe");
+        if versioned_path.exists() {
+            tracing::info!("Ghostscript installed to versioned path: {:?}", versioned_path);
+            Ok(versioned_path)
+        } else {
+            Err("Ghostscript installation failed - executable not found".into())
+        }
+    }
+}
+
 /// Get the path where SumatraPDF should be stored
 #[cfg(target_os = "windows")]
 fn get_sumatra_dir() -> PathBuf {
@@ -377,13 +461,14 @@ async fn print_pdf_windows(
     printer_name: Option<&str>,
     copies: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("=== WINDOWS PRINT (SumatraPDF) ===");
+    tracing::info!("=== WINDOWS PRINT (Ghostscript) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
 
-    // Ensure SumatraPDF is available
-    let sumatra_path = ensure_sumatra_available().await?;
+    // Ensure Ghostscript is available (download if needed)
+    let gs_path = ensure_ghostscript_available().await?;
+    tracing::info!("Ghostscript path: {:?}", gs_path);
 
     // Get printer name (use default if not specified)
     let printer = match printer_name {
@@ -400,51 +485,65 @@ async fn print_pdf_windows(
 
     tracing::info!("Using printer: {}", printer);
 
-    // Configure high-quality settings for Epson printers
+    // Configure DEVMODE for Epson printers (Ghostscript will use these settings!)
+    // Unlike SumatraPDF, Ghostscript's mswinpr2 device respects the printer's DEVMODE
     if printer.to_lowercase().contains("epson") {
-        tracing::info!("Detected Epson printer - configuring for high-quality label printing...");
+        tracing::info!("Detected Epson printer - configuring DEVMODE for high-quality printing...");
         match configure_printer_quality(&printer) {
-            Ok(()) => tracing::info!("Printer configured successfully"),
-            Err(e) => tracing::warn!("Could not configure printer quality: {}. Continuing with defaults.", e),
+            Ok(()) => tracing::info!("Printer DEVMODE configured: 600 DPI + Matte paper"),
+            Err(e) => tracing::warn!("Could not configure DEVMODE: {}. Using defaults.", e),
         }
     }
 
-    // Build print settings for SumatraPDF
-    // noscale = actual size (no fit-to-page)
-    // For multiple copies, we call SumatraPDF multiple times
-    // SumatraPDF print settings: https://www.sumatrapdfreader.org/docs/Command-line-arguments
-    let print_settings = "noscale";
+    // Build Ghostscript command
+    // mswinpr2 device: Windows printer driver that respects DEVMODE settings
+    // Key difference from SumatraPDF: Ghostscript queries and uses the printer's configured DEVMODE
+    let output_device = format!("%printer%{}", printer);
 
-    for i in 0..copies {
-        tracing::info!("Printing copy {} of {}", i + 1, copies);
+    let args = vec![
+        "-dBATCH".to_string(),           // Exit after processing
+        "-dNOPAUSE".to_string(),         // No pause between pages
+        "-dPrinted".to_string(),         // Suppress showpage
+        "-dNoCancel".to_string(),        // Don't show cancel dialog
+        "-dNOSAFER".to_string(),         // Allow file operations (needed for some PDFs)
+        "-sDEVICE=mswinpr2".to_string(), // Windows printer device (uses DEVMODE!)
+        format!("-sOutputFile={}", output_device),
+        "-dPDFFitPage=false".to_string(), // Don't fit to page (actual size)
+        "-dPSFitPage=false".to_string(),  // Don't fit PostScript to page
+        format!("-dNumCopies={}", copies), // Handle copies in one command
+        pdf_path.to_string(),
+    ];
 
-        let output = Command::new(&sumatra_path)
-            .args([
-                "-print-to", &printer,
-                "-print-settings", print_settings,
-                "-silent",
-                pdf_path,
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()?;
+    tracing::info!("Ghostscript args: {:?}", args);
 
-        tracing::info!("SumatraPDF exit status: {:?}", output.status);
+    let output = Command::new(&gs_path)
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
 
-        if !output.stdout.is_empty() {
-            tracing::debug!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    tracing::info!("Ghostscript exit status: {:?}", output.status);
+
+    if !output.stdout.is_empty() {
+        tracing::debug!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        // Ghostscript often outputs to stderr even on success
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            tracing::debug!("stderr: {}", stderr_str);
+        } else {
+            tracing::error!("stderr: {}", stderr_str);
         }
-        if !output.stderr.is_empty() {
-            tracing::debug!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-        }
+    }
 
-        if !output.status.success() {
-            let err_msg = format!(
-                "SumatraPDF print failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            tracing::error!("{}", err_msg);
-            return Err(err_msg.into());
-        }
+    if !output.status.success() {
+        let err_msg = format!(
+            "Ghostscript print failed (exit code {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        tracing::error!("{}", err_msg);
+        return Err(err_msg.into());
     }
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
