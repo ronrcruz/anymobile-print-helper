@@ -1,6 +1,6 @@
 [package]
 name = "anymobile-print-helper"
-version = "1.0.29"
+version = "1.0.30"
 description = "Desktop print helper for AnyMobile label printing"
 authors = ["AnyMobile"]
 edition = "2021"

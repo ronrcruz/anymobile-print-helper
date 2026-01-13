@@ -155,17 +155,34 @@ fn get_ghostscript_path() -> PathBuf {
     get_ghostscript_dir().join("bin").join("gswin64c.exe")
 }
 
+/// Check if Ghostscript is installed and return the path if found
+#[cfg(target_os = "windows")]
+fn find_ghostscript_path() -> Option<PathBuf> {
+    let gs_dir = get_ghostscript_dir();
+
+    // Check direct path first
+    let direct_path = gs_dir.join("bin").join("gswin64c.exe");
+    if direct_path.exists() {
+        return Some(direct_path);
+    }
+
+    // Check versioned subdirectory (installer creates gs10.04.0/bin/gswin64c.exe)
+    let versioned_path = gs_dir.join("gs10.04.0").join("bin").join("gswin64c.exe");
+    if versioned_path.exists() {
+        return Some(versioned_path);
+    }
+
+    None
+}
+
 /// Download and install Ghostscript if not present
 /// Ghostscript's mswinpr2 device respects DEVMODE settings unlike SumatraPDF
 #[cfg(target_os = "windows")]
-async fn ensure_ghostscript_available() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let gs_path = get_ghostscript_path();
-    let gs_dll = get_ghostscript_dir().join("bin").join("gsdll64.dll");
-
+pub async fn ensure_ghostscript_available() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     // Check if already installed
-    if gs_path.exists() && gs_dll.exists() {
-        tracing::info!("Ghostscript already available at {:?}", gs_path);
-        return Ok(gs_path);
+    if let Some(existing_path) = find_ghostscript_path() {
+        tracing::info!("Ghostscript already available at {:?}", existing_path);
+        return Ok(existing_path);
     }
 
     tracing::info!("Downloading Ghostscript for high-quality printing...");
@@ -191,35 +208,48 @@ async fn ensure_ghostscript_available() -> Result<PathBuf, Box<dyn std::error::E
 
     // Run silent install to our local directory
     // /S = silent, /D = destination directory
+    // NOTE: We do NOT use CREATE_NO_WINDOW because it hides the UAC prompt!
     let install_target = gs_dir.to_string_lossy().to_string();
-    tracing::info!("Installing Ghostscript silently to: {}", install_target);
+    tracing::info!("Installing Ghostscript to: {} (UAC prompt will appear)", install_target);
 
-    let output = Command::new(&installer_path)
+    let mut child = Command::new(&installer_path)
         .args(["/S", &format!("/D={}", install_target)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
+        // NO creation_flags - let the installer show UAC prompt
+        .spawn()?;
 
-    tracing::info!("Installer exit status: {:?}", output.status);
+    // Wait for installer to complete (with timeout)
+    let timeout = std::time::Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                tracing::info!("Installer completed with status: {:?}", status);
+                break;
+            }
+            None if start.elapsed() > timeout => {
+                let _ = child.kill();
+                tracing::error!("Installer timed out after 120 seconds");
+                return Err("Ghostscript installer timed out".into());
+            }
+            None => {
+                // Still running, wait a bit
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
 
-    // Wait a moment for installation to complete
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    // Give the installer a moment to finish writing files
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // Clean up installer
     let _ = std::fs::remove_file(&installer_path);
 
-    // Verify installation
-    if gs_path.exists() {
-        tracing::info!("Ghostscript installed successfully to {:?}", gs_path);
-        Ok(gs_path)
+    // Verify installation using the helper function
+    if let Some(installed_path) = find_ghostscript_path() {
+        tracing::info!("Ghostscript installed successfully to {:?}", installed_path);
+        Ok(installed_path)
     } else {
-        // Check if it installed to a versioned subdirectory
-        let versioned_path = gs_dir.join("gs10.04.0").join("bin").join("gswin64c.exe");
-        if versioned_path.exists() {
-            tracing::info!("Ghostscript installed to versioned path: {:?}", versioned_path);
-            Ok(versioned_path)
-        } else {
-            Err("Ghostscript installation failed - executable not found".into())
-        }
+        Err("Ghostscript installation failed - executable not found".into())
     }
 }
 
@@ -455,19 +485,18 @@ if ([PrinterConfig]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) 
     }
 }
 
+/// Print PDF using Ghostscript (high quality - respects DEVMODE)
 #[cfg(target_os = "windows")]
-async fn print_pdf_windows(
+async fn print_pdf_ghostscript(
     pdf_path: &str,
     printer_name: Option<&str>,
     copies: u32,
+    gs_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("=== WINDOWS PRINT (Ghostscript) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
-
-    // Ensure Ghostscript is available (download if needed)
-    let gs_path = ensure_ghostscript_available().await?;
     tracing::info!("Ghostscript path: {:?}", gs_path);
 
     // Get printer name (use default if not specified)
@@ -548,6 +577,81 @@ async fn print_pdf_windows(
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
     Ok(())
+}
+
+/// Print PDF using SumatraPDF (fallback - lower quality, ignores DEVMODE)
+#[cfg(target_os = "windows")]
+async fn print_pdf_sumatra(
+    pdf_path: &str,
+    printer_name: Option<&str>,
+    copies: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("=== WINDOWS PRINT (SumatraPDF fallback) ===");
+    tracing::info!("PDF path: {}", pdf_path);
+    tracing::info!("Printer: {:?}", printer_name);
+    tracing::info!("Copies: {}", copies);
+
+    // Ensure SumatraPDF is available (download if needed)
+    let sumatra_path = ensure_sumatra_available().await?;
+    tracing::info!("SumatraPDF path: {:?}", sumatra_path);
+
+    // Build print command
+    let mut args = vec![
+        "-print-to".to_string(),
+    ];
+
+    if let Some(name) = printer_name {
+        args.push(name.to_string());
+    } else {
+        args.push("-print-to-default".to_string());
+        args.remove(0); // Remove -print-to, use -print-to-default instead
+        args.insert(0, "-print-to-default".to_string());
+    }
+
+    // Add settings for multiple copies and quality
+    args.push("-print-settings".to_string());
+    args.push(format!("{}x,noscale", copies));
+    args.push("-silent".to_string());
+    args.push(pdf_path.to_string());
+
+    tracing::info!("SumatraPDF args: {:?}", args);
+
+    let output = Command::new(&sumatra_path)
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    tracing::info!("SumatraPDF exit status: {:?}", output.status);
+
+    if !output.status.success() {
+        let err_msg = format!(
+            "SumatraPDF print failed (exit code {:?})",
+            output.status.code()
+        );
+        tracing::error!("{}", err_msg);
+        return Err(err_msg.into());
+    }
+
+    tracing::info!("=== WINDOWS PRINT COMPLETE (SumatraPDF) ===");
+    Ok(())
+}
+
+/// Main Windows print function - uses Ghostscript if available, falls back to SumatraPDF
+#[cfg(target_os = "windows")]
+async fn print_pdf_windows(
+    pdf_path: &str,
+    printer_name: Option<&str>,
+    copies: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Check if Ghostscript is installed (was downloaded at app startup)
+    if let Some(gs_path) = find_ghostscript_path() {
+        tracing::info!("Using Ghostscript for high-quality printing");
+        print_pdf_ghostscript(pdf_path, printer_name, copies, &gs_path).await
+    } else {
+        tracing::warn!("Ghostscript not installed, using SumatraPDF (lower quality)");
+        tracing::warn!("For best print quality, please restart the app and accept the Ghostscript installation prompt");
+        print_pdf_sumatra(pdf_path, printer_name, copies).await
+    }
 }
 
 // ============================================================================

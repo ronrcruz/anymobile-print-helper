@@ -194,6 +194,19 @@ fn main() {
                 }
             });
 
+            // Pre-download Ghostscript on Windows for high-quality printing
+            // This happens at startup so user doesn't wait during print
+            #[cfg(target_os = "windows")]
+            {
+                tauri::async_runtime::spawn(async {
+                    tracing::info!("Checking Ghostscript availability for high-quality printing...");
+                    match printer::ensure_ghostscript_available().await {
+                        Ok(path) => tracing::info!("Ghostscript ready at: {:?}", path),
+                        Err(e) => tracing::warn!("Ghostscript setup failed: {}. Will use SumatraPDF as fallback.", e),
+                    }
+                });
+            }
+
             // Hide window on startup if minimized flag is set
             if std::env::args().any(|arg| arg == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
