@@ -601,8 +601,8 @@ fn render_pdf_to_png(
     Ok(output_path)
 }
 
-/// Print an image file using Windows GDI with PrinterResolution set DIRECTLY
-/// KEY FIX: Sets resolution on PrintDocument itself, not via separate DEVMODE
+/// Print an image file using Windows GDI with PAPER TYPE set via DEVMODE
+/// KEY FIX: Uses GetHdevmode/SetHdevmode to set dmMediaType (paper type) DIRECTLY!
 #[cfg(target_os = "windows")]
 fn print_image_windows(
     image_path: &std::path::Path,
@@ -613,13 +613,53 @@ fn print_image_windows(
     tracing::info!("Printer: {}, Copies: {}", printer_name, copies);
 
     // Use PowerShell with .NET System.Drawing.Printing
-    // KEY: Set PrinterResolution DIRECTLY on PrintDocument (not separate DEVMODE!)
+    // KEY FIX: Set PAPER TYPE (dmMediaType) via GetHdevmode/SetHdevmode!
     let ps_script = format!(r#"
 Add-Type -AssemblyName System.Drawing
+
+# P/Invoke for DEVMODE manipulation
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public class DevModeHelper {{
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool GlobalUnlock(IntPtr hMem);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalFree(IntPtr hMem);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
+    public static extern int DeviceCapabilities(string pDevice, string pPort,
+        ushort fwCapability, IntPtr pOutput, IntPtr pDevMode);
+
+    // DEVMODE field offsets (64-bit)
+    public const int dmFields_offset = 40;
+    public const int dmPrintQuality_offset = 58;
+    public const int dmYResolution_offset = 60;
+    public const int dmMediaType_offset = 62;
+
+    // DEVMODE field flags
+    public const int DM_PRINTQUALITY = 0x0400;
+    public const int DM_YRESOLUTION = 0x2000;
+    public const int DM_MEDIATYPE = 0x0200;
+
+    // DeviceCapabilities constants
+    public const ushort DC_MEDIATYPES = 35;
+    public const ushort DC_MEDIATYPENAMES = 36;
+}}
+'@
 
 $imagePath = '{}'
 $printerName = '{}'
 $copies = {}
+
+Write-Host "=== PRINT JOB START ==="
+Write-Host "Image: $imagePath"
+Write-Host "Printer: $printerName"
 
 # Load the image
 $image = [System.Drawing.Image]::FromFile($imagePath)
@@ -630,81 +670,137 @@ $printDoc.PrinterSettings.PrinterName = $printerName
 $printDoc.PrinterSettings.Copies = $copies
 
 # ============================================================
-# KEY FIX: Set PrinterResolution DIRECTLY on the PrintDocument!
-# This was the bug - we were setting DEVMODE separately but
-# PrintDocument uses its own settings, ignoring our DEVMODE.
+# STEP 1: Query available media types from printer
 # ============================================================
+Write-Host "`n=== QUERYING MEDIA TYPES ==="
 
-Write-Host "Available printer resolutions:"
-$bestRes = $null
-$bestDpi = 0
+$mediaTypeId = 0
+$count = [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
 
-foreach ($res in $printDoc.PrinterSettings.PrinterResolutions) {{
-    $resX = $res.X
-    $resY = $res.Y
-    $kind = $res.Kind
-    Write-Host "  Resolution: $resX x $resY (Kind: $kind)"
+if ($count -gt 0) {{
+    Write-Host "Found $count media types"
 
-    # Find the highest resolution available
-    if ($resX -gt 0 -and $resX -ge $bestDpi) {{
-        $bestDpi = $resX
-        $bestRes = $res
+    $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
+    $nameBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 128)
+
+    try {{
+        [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
+        [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPENAMES, $nameBuffer, [IntPtr]::Zero) | Out-Null
+
+        $bestMatch = $null
+        $bestPriority = 0
+
+        for ($i = 0; $i -lt $count; $i++) {{
+            $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
+            $namePtr = [IntPtr]::Add($nameBuffer, $i * 128)
+            $name = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($namePtr, 64).TrimEnd([char]0)
+
+            Write-Host "  [$i] ID=$id Name='$name'"
+
+            # Priority: Photo Matte > Premium Matte > Matte > Photo
+            if ($name -match "Photo.*Matte|Matte.*Photo" -and $bestPriority -lt 6) {{
+                $bestMatch = $id
+                $bestPriority = 6
+                Write-Host "      -> BEST MATCH (Photo Matte)"
+            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 4) {{
+                $bestMatch = $id
+                $bestPriority = 4
+            }} elseif ($name -match "Matte" -and $bestPriority -lt 2) {{
+                $bestMatch = $id
+                $bestPriority = 2
+            }} elseif ($name -match "Photo" -and $bestPriority -lt 1) {{
+                $bestMatch = $id
+                $bestPriority = 1
+            }}
+        }}
+
+        if ($bestMatch -ne $null) {{
+            $mediaTypeId = $bestMatch
+            Write-Host "SELECTED MEDIA TYPE ID: $mediaTypeId"
+        }} else {{
+            Write-Host "WARNING: No matching media type found, using default"
+        }}
+    }} finally {{
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
     }}
-    # Prefer "High" quality kind
-    if ($kind -eq [System.Drawing.Printing.PrinterResolutionKind]::High) {{
-        $bestRes = $res
-        $bestDpi = 9999  # High quality takes priority
-    }}
-}}
-
-if ($bestRes -ne $null) {{
-    $printDoc.DefaultPageSettings.PrinterResolution = $bestRes
-    Write-Host "SELECTED RESOLUTION: $($bestRes.X) x $($bestRes.Y) (Kind: $($bestRes.Kind))"
 }} else {{
-    Write-Host "WARNING: Could not find a suitable resolution"
+    Write-Host "WARNING: Could not query media types"
 }}
 
-# Enable color printing
-$printDoc.DefaultPageSettings.Color = $true
-Write-Host "Color printing: Enabled"
+# ============================================================
+# STEP 2: Get DEVMODE and modify paper type + resolution
+# ============================================================
+Write-Host "`n=== APPLYING DEVMODE SETTINGS ==="
 
-# Set zero margins for labels
+try {{
+    # Get DEVMODE handle from PrinterSettings
+    $hDevMode = $printDoc.PrinterSettings.GetHdevmode($printDoc.DefaultPageSettings)
+    $pDevMode = [DevModeHelper]::GlobalLock($hDevMode)
+
+    if ($pDevMode -ne [IntPtr]::Zero) {{
+        # Read current dmFields
+        $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, [DevModeHelper]::dmFields_offset)
+
+        # Add our flags
+        $dmFields = $dmFields -bor [DevModeHelper]::DM_PRINTQUALITY -bor [DevModeHelper]::DM_YRESOLUTION -bor [DevModeHelper]::DM_MEDIATYPE
+
+        # Write back dmFields
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, [DevModeHelper]::dmFields_offset, $dmFields)
+
+        # Set 600 DPI
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmPrintQuality_offset, 600)
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmYResolution_offset, 600)
+        Write-Host "Set resolution: 600 x 600 DPI"
+
+        # Set media type (PAPER TYPE - THE KEY FIX!)
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmMediaType_offset, $mediaTypeId)
+        Write-Host "Set media type (PAPER TYPE): $mediaTypeId"
+
+        [DevModeHelper]::GlobalUnlock($hDevMode) | Out-Null
+
+        # Apply DEVMODE back to PrinterSettings AND PageSettings
+        $printDoc.PrinterSettings.SetHdevmode($hDevMode)
+        $printDoc.DefaultPageSettings.SetHdevmode($hDevMode)
+        Write-Host "DEVMODE applied to PrintDocument!"
+
+        [DevModeHelper]::GlobalFree($hDevMode) | Out-Null
+    }} else {{
+        Write-Host "ERROR: Could not lock DEVMODE"
+    }}
+}} catch {{
+    Write-Host "WARNING: DEVMODE modification failed: $($_.Exception.Message)"
+}}
+
+# ============================================================
+# STEP 3: Set other print settings
+# ============================================================
+$printDoc.DefaultPageSettings.Color = $true
 $printDoc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
 
-# Print handler - draws the pre-rendered 600 DPI image
+# ============================================================
+# STEP 4: Print handler
+# ============================================================
 $printHandler = {{
     param($sender, $e)
 
-    # Get printable area
-    $pageBounds = $e.PageBounds
-    $marginBounds = $e.MarginBounds
-
-    # Image dimensions
     $imgWidth = $image.Width
     $imgHeight = $image.Height
 
-    # The image is rendered at 600 DPI
-    # PrintDocument graphics are in 1/100 inch units
-    # So a 600 DPI image that's 2400 pixels wide = 4 inches = 400 units
+    # 600 DPI image to 1/100 inch units
     $scaleFactor = 100.0 / 600.0
     $drawWidth = $imgWidth * $scaleFactor
     $drawHeight = $imgHeight * $scaleFactor
 
-    Write-Host "Image: $imgWidth x $imgHeight pixels"
-    Write-Host "Draw size: $drawWidth x $drawHeight units (1/100 inch)"
-    Write-Host "Page bounds: $($pageBounds.Width) x $($pageBounds.Height)"
+    Write-Host "Drawing: $drawWidth x $drawHeight units"
 
-    # Position at top-left with small margin for labels
     $x = 10
     $y = 10
 
-    # Set high quality rendering
     $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-    $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
     $e.Graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 
-    # Draw the image
     $destRect = New-Object System.Drawing.RectangleF($x, $y, $drawWidth, $drawHeight)
     $srcRect = New-Object System.Drawing.RectangleF(0, 0, $imgWidth, $imgHeight)
     $e.Graphics.DrawImage($image, $destRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
@@ -715,9 +811,9 @@ $printHandler = {{
 $printDoc.add_PrintPage($printHandler)
 
 try {{
-    Write-Host "Sending print job to: $printerName"
+    Write-Host "`n=== SENDING PRINT JOB ==="
     $printDoc.Print()
-    Write-Host "SUCCESS: Print job sent to $printerName"
+    Write-Host "SUCCESS: Print job sent with MediaType=$mediaTypeId, Resolution=600 DPI"
 }} catch {{
     Write-Host "ERROR: $($_.Exception.Message)"
 }} finally {{
