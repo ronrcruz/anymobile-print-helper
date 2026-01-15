@@ -552,7 +552,162 @@ if ([PrinterConfig]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) 
     }
 }
 
-/// Print PDF using Ghostscript (high quality - respects DEVMODE)
+/// Render PDF to high-resolution PNG using Ghostscript's png16m device
+/// Unlike mswinpr2, the png16m device ACTUALLY respects the -r flag for resolution!
+#[cfg(target_os = "windows")]
+fn render_pdf_to_png(
+    pdf_path: &str,
+    gs_path: &std::path::Path,
+    dpi: u32,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let temp_dir = std::env::temp_dir();
+    let output_path = temp_dir.join(format!("print_label_{}.png", Uuid::new_v4()));
+
+    tracing::info!("Rendering PDF to {} DPI PNG: {:?}", dpi, output_path);
+
+    let args = vec![
+        "-dBATCH".to_string(),
+        "-dNOPAUSE".to_string(),
+        "-dSAFER".to_string(),
+        "-sDEVICE=png16m".to_string(),           // 24-bit color PNG (actually respects -r!)
+        format!("-r{}", dpi),                     // Resolution - THIS WORKS for png16m!
+        "-dTextAlphaBits=4".to_string(),          // Text anti-aliasing
+        "-dGraphicsAlphaBits=4".to_string(),      // Graphics anti-aliasing
+        format!("-sOutputFile={}", output_path.display()),
+        pdf_path.to_string(),
+    ];
+
+    tracing::debug!("Ghostscript render args: {:?}", args);
+
+    let output = Command::new(gs_path)
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    if !output.status.success() {
+        let err = format!(
+            "Failed to render PDF to PNG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        tracing::error!("{}", err);
+        return Err(err.into());
+    }
+
+    if !output_path.exists() {
+        return Err("PNG file was not created".into());
+    }
+
+    tracing::info!("PNG rendered successfully: {:?}", output_path);
+    Ok(output_path)
+}
+
+/// Print an image file using Windows GDI with proper DEVMODE settings
+/// This gives us full control over print quality since we pre-rendered at 600 DPI
+#[cfg(target_os = "windows")]
+fn print_image_windows(
+    image_path: &std::path::Path,
+    printer_name: &str,
+    copies: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("Printing image via Windows GDI: {:?}", image_path);
+    tracing::info!("Printer: {}, Copies: {}", printer_name, copies);
+
+    // Use PowerShell with .NET System.Drawing.Printing for proper print control
+    // This respects DEVMODE settings we configured earlier
+    let ps_script = format!(r#"
+Add-Type -AssemblyName System.Drawing
+
+$imagePath = '{}'
+$printerName = '{}'
+$copies = {}
+
+# Load the image
+$image = [System.Drawing.Image]::FromFile($imagePath)
+
+# Create print document
+$printDoc = New-Object System.Drawing.Printing.PrintDocument
+$printDoc.PrinterSettings.PrinterName = $printerName
+$printDoc.PrinterSettings.Copies = $copies
+
+# Set to print actual size (no scaling)
+$printDoc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
+
+# Print handler - draws the pre-rendered 600 DPI image
+$printHandler = {{
+    param($sender, $e)
+
+    # Get page bounds
+    $pageBounds = $e.PageBounds
+
+    # Calculate position to center the image on the page
+    # The image is already at 600 DPI, so we draw it at its natural size
+    $imgWidth = $image.Width
+    $imgHeight = $image.Height
+
+    # Convert from 600 DPI image pixels to printer units (100 DPI base)
+    # Printer graphics are at 100 units per inch by default
+    $scaleFactor = 100.0 / 600.0
+    $drawWidth = $imgWidth * $scaleFactor
+    $drawHeight = $imgHeight * $scaleFactor
+
+    # Center on page
+    $x = ($pageBounds.Width - $drawWidth) / 2
+    $y = ($pageBounds.Height - $drawHeight) / 2
+
+    # Draw with high quality interpolation
+    $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+
+    # Draw the image
+    $destRect = New-Object System.Drawing.RectangleF($x, $y, $drawWidth, $drawHeight)
+    $srcRect = New-Object System.Drawing.RectangleF(0, 0, $imgWidth, $imgHeight)
+    $e.Graphics.DrawImage($image, $destRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
+
+    $e.HasMorePages = $false
+}}
+
+$printDoc.add_PrintPage($printHandler)
+
+try {{
+    $printDoc.Print()
+    Write-Host "SUCCESS: Print job sent to $printerName"
+}} catch {{
+    Write-Host "ERROR: $($_.Exception.Message)"
+}} finally {{
+    $image.Dispose()
+    $printDoc.Dispose()
+}}
+"#, image_path.display().to_string().replace("\\", "\\\\").replace("'", "''"),
+    printer_name.replace("'", "''"),
+    copies);
+
+    let output = Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", &ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    tracing::info!("Print output: {}", stdout);
+    if !stderr.is_empty() {
+        tracing::warn!("Print stderr: {}", stderr);
+    }
+
+    if stdout.contains("SUCCESS") {
+        Ok(())
+    } else if stdout.contains("ERROR") {
+        Err(format!("Print failed: {}", stdout).into())
+    } else {
+        // Assume success if no explicit error
+        Ok(())
+    }
+}
+
+/// Print PDF using Ghostscript with TWO-STEP RENDERING for guaranteed quality
+/// Step 1: Render PDF to 600 DPI PNG (png16m device respects -r flag!)
+/// Step 2: Print PNG using Windows GDI with proper DEVMODE
 #[cfg(target_os = "windows")]
 async fn print_pdf_ghostscript(
     pdf_path: &str,
@@ -560,7 +715,7 @@ async fn print_pdf_ghostscript(
     copies: u32,
     gs_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("=== WINDOWS PRINT (Ghostscript) ===");
+    tracing::info!("=== WINDOWS PRINT (Two-Step High Quality) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
@@ -570,7 +725,6 @@ async fn print_pdf_ghostscript(
     let printer = match printer_name {
         Some(name) => name.to_string(),
         None => {
-            // Get default printer via PowerShell
             let output = Command::new("powershell")
                 .args(["-Command", "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name"])
                 .creation_flags(CREATE_NO_WINDOW)
@@ -581,84 +735,28 @@ async fn print_pdf_ghostscript(
 
     tracing::info!("Using printer: {}", printer);
 
-    // Configure DEVMODE for ALL printers (not just Epson)
-    // Ghostscript's mswinpr2 device respects the printer's DEVMODE settings
-    tracing::info!("Configuring printer DEVMODE for high-quality printing...");
+    // Step 1: Configure DEVMODE for the printer (600 DPI, Photo Matte paper)
+    tracing::info!("Step 1: Configuring printer DEVMODE...");
     match configure_printer_quality(&printer) {
-        Ok(()) => tracing::info!("Printer DEVMODE configured: 600 DPI + preferred paper type"),
-        Err(e) => tracing::warn!("Could not configure DEVMODE: {}. Using Ghostscript quality flags as fallback.", e),
+        Ok(()) => tracing::info!("DEVMODE configured: 600 DPI + Photo Matte paper"),
+        Err(e) => tracing::warn!("DEVMODE config warning: {}. Continuing with pre-rendered quality.", e),
     }
 
-    // Build Ghostscript command
-    // mswinpr2 device: Windows printer driver that respects DEVMODE settings
-    // Key difference from SumatraPDF: Ghostscript queries and uses the printer's configured DEVMODE
-    let output_device = format!("%printer%{}", printer);
+    // Step 2: Render PDF to 600 DPI PNG
+    // This is the KEY - png16m device ACTUALLY respects the -r flag unlike mswinpr2!
+    tracing::info!("Step 2: Rendering PDF to 600 DPI PNG...");
+    let png_path = render_pdf_to_png(pdf_path, gs_path, 600)?;
 
-    let args = vec![
-        // Core processing flags
-        "-dBATCH".to_string(),           // Exit after processing
-        "-dNOPAUSE".to_string(),         // No pause between pages
-        "-dPrinted".to_string(),         // Suppress showpage
-        "-dNoCancel".to_string(),        // Don't show cancel dialog
-        "-dNOSAFER".to_string(),         // Allow file operations (needed for some PDFs)
+    // Step 3: Print the PNG using Windows GDI
+    tracing::info!("Step 3: Printing PNG via Windows GDI...");
+    let print_result = print_image_windows(&png_path, &printer, copies);
 
-        // Output device and destination
-        "-sDEVICE=mswinpr2".to_string(), // Windows printer device (uses DEVMODE!)
-        format!("-sOutputFile={}", output_device),
-
-        // Resolution and quality flags (CRITICAL for print quality)
-        "-r600x600".to_string(),              // 600 DPI in X and Y
-        "-dTextAlphaBits=4".to_string(),      // Maximum text anti-aliasing
-        "-dGraphicsAlphaBits=4".to_string(),  // Maximum graphics anti-aliasing
-
-        // Color and image preservation (prevent downsampling)
-        "-dColorConversionStrategy=/LeaveColorUnchanged".to_string(),
-        "-dDownsampleColorImages=false".to_string(),
-        "-dDownsampleGrayImages=false".to_string(),
-        "-dDownsampleMonoImages=false".to_string(),
-
-        // Page handling
-        "-dPDFFitPage=false".to_string(), // Don't fit to page (actual size)
-        "-dPSFitPage=false".to_string(),  // Don't fit PostScript to page
-
-        // Copies
-        format!("-dNumCopies={}", copies), // Handle copies in one command
-
-        // Input file (must be last)
-        pdf_path.to_string(),
-    ];
-
-    tracing::info!("Ghostscript args: {:?}", args);
-
-    let output = Command::new(&gs_path)
-        .args(&args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-
-    tracing::info!("Ghostscript exit status: {:?}", output.status);
-
-    if !output.stdout.is_empty() {
-        tracing::debug!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-    }
-    if !output.stderr.is_empty() {
-        // Ghostscript often outputs to stderr even on success
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() {
-            tracing::debug!("stderr: {}", stderr_str);
-        } else {
-            tracing::error!("stderr: {}", stderr_str);
-        }
+    // Step 4: Cleanup temp file
+    if let Err(e) = std::fs::remove_file(&png_path) {
+        tracing::warn!("Failed to cleanup temp PNG: {}", e);
     }
 
-    if !output.status.success() {
-        let err_msg = format!(
-            "Ghostscript print failed (exit code {:?}): {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        tracing::error!("{}", err_msg);
-        return Err(err_msg.into());
-    }
+    print_result?;
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
     Ok(())
