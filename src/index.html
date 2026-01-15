@@ -540,6 +540,7 @@
         // State
         let currentLogFilter = 'all';
         let isWindows = false;
+        let ghostscriptChecked = false;  // Cache flag to prevent repeated checks
 
         // Elements
         const elements = {
@@ -632,11 +633,16 @@
         }
 
         // Check and update Ghostscript status (Windows only)
-        async function checkGhostscriptStatus() {
+        // Uses cache to prevent repeated expensive checks (where command opens cmd windows)
+        async function checkGhostscriptStatus(forceRefresh = false) {
             if (!isWindows) return;
+
+            // Skip if already checked (unless forced)
+            if (ghostscriptChecked && !forceRefresh) return;
 
             try {
                 const installed = await invoke('check_ghostscript_installed');
+                ghostscriptChecked = true;  // Mark as checked
 
                 elements.ghostscriptSection.classList.remove('hidden', 'trusted');
 
@@ -670,7 +676,7 @@
 
                 const result = await invoke('install_ghostscript');
                 showToast(result);
-                await checkGhostscriptStatus();
+                await checkGhostscriptStatus(true);  // Force refresh after install
             } catch (error) {
                 showToast('Installation failed: ' + error);
                 btn.textContent = originalText;
@@ -806,6 +812,7 @@
 
         // Refresh all
         window.refreshAll = async function() {
+            ghostscriptChecked = false;  // Reset cache on manual refresh
             await Promise.all([
                 refreshDiagnostics(),
                 refreshPrinters(),

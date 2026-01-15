@@ -572,14 +572,12 @@ async fn print_pdf_ghostscript(
 
     tracing::info!("Using printer: {}", printer);
 
-    // Configure DEVMODE for Epson printers (Ghostscript will use these settings!)
-    // Unlike SumatraPDF, Ghostscript's mswinpr2 device respects the printer's DEVMODE
-    if printer.to_lowercase().contains("epson") {
-        tracing::info!("Detected Epson printer - configuring DEVMODE for high-quality printing...");
-        match configure_printer_quality(&printer) {
-            Ok(()) => tracing::info!("Printer DEVMODE configured: 600 DPI + Matte paper"),
-            Err(e) => tracing::warn!("Could not configure DEVMODE: {}. Using defaults.", e),
-        }
+    // Configure DEVMODE for ALL printers (not just Epson)
+    // Ghostscript's mswinpr2 device respects the printer's DEVMODE settings
+    tracing::info!("Configuring printer DEVMODE for high-quality printing...");
+    match configure_printer_quality(&printer) {
+        Ok(()) => tracing::info!("Printer DEVMODE configured: 600 DPI + preferred paper type"),
+        Err(e) => tracing::warn!("Could not configure DEVMODE: {}. Using Ghostscript quality flags as fallback.", e),
     }
 
     // Build Ghostscript command
@@ -588,16 +586,36 @@ async fn print_pdf_ghostscript(
     let output_device = format!("%printer%{}", printer);
 
     let args = vec![
+        // Core processing flags
         "-dBATCH".to_string(),           // Exit after processing
         "-dNOPAUSE".to_string(),         // No pause between pages
         "-dPrinted".to_string(),         // Suppress showpage
         "-dNoCancel".to_string(),        // Don't show cancel dialog
         "-dNOSAFER".to_string(),         // Allow file operations (needed for some PDFs)
+
+        // Output device and destination
         "-sDEVICE=mswinpr2".to_string(), // Windows printer device (uses DEVMODE!)
         format!("-sOutputFile={}", output_device),
+
+        // Resolution and quality flags (CRITICAL for print quality)
+        "-r600x600".to_string(),              // 600 DPI in X and Y
+        "-dTextAlphaBits=4".to_string(),      // Maximum text anti-aliasing
+        "-dGraphicsAlphaBits=4".to_string(),  // Maximum graphics anti-aliasing
+
+        // Color and image preservation (prevent downsampling)
+        "-dColorConversionStrategy=/LeaveColorUnchanged".to_string(),
+        "-dDownsampleColorImages=false".to_string(),
+        "-dDownsampleGrayImages=false".to_string(),
+        "-dDownsampleMonoImages=false".to_string(),
+
+        // Page handling
         "-dPDFFitPage=false".to_string(), // Don't fit to page (actual size)
         "-dPSFitPage=false".to_string(),  // Don't fit PostScript to page
+
+        // Copies
         format!("-dNumCopies={}", copies), // Handle copies in one command
+
+        // Input file (must be last)
         pdf_path.to_string(),
     ];
 
