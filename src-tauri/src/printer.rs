@@ -397,7 +397,6 @@ public class PrinterConfig {{
 
 # DeviceCapabilities constants
 $DC_MEDIATYPES = 35
-$DC_MEDIATYPENAMES = 36
 
 # DEVMODE field offsets (64-bit Windows)
 $dmFields_offset = 40
@@ -410,70 +409,52 @@ $DM_PRINTQUALITY = 0x0400
 $DM_YRESOLUTION = 0x2000
 $DM_MEDIATYPE = 0x0200
 
-# Step 1: Query supported media types
+# Step 1: Query media type IDs only (NO names - they corrupt!)
 $mediaTypeId = 0  # Default to plain paper
 $count = [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
 
 if ($count -gt 0) {{
     Write-Host "Found $count media types"
 
-    # Allocate buffers for IDs (4 bytes each) and names (64 chars * 2 bytes = 128 bytes each)
     $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
-    $nameBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 128)
 
     try {{
         [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
-        [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPENAMES, $nameBuffer, [IntPtr]::Zero) | Out-Null
 
-        # Find best match for high-quality matte/photo paper
-        # Priority: Photo Matte > Premium Matte > Matte > Photo > Plain
-        $bestMatch = $null
-        $bestPriority = 0
-
+        # Collect all media type IDs
+        $mediaTypeIds = @()
         for ($i = 0; $i -lt $count; $i++) {{
             $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
-            $namePtr = [IntPtr]::Add($nameBuffer, $i * 128)
-            $name = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($namePtr, 64).TrimEnd([char]0)
-
-            Write-Host "  Media type $i : ID=$id, Name='$name'"
-
-            # Priority matching - Photo Matte is typically best for labels
-            if ($name -match "Photo.*Matte|Matte.*Photo" -and $bestPriority -lt 6) {{
-                $bestMatch = $id
-                $bestPriority = 6
-                Write-Host "    -> Best match: Photo Matte (priority 6)"
-            }} elseif ($name -match "Premium.*Presentation.*Matte" -and $bestPriority -lt 5) {{
-                $bestMatch = $id
-                $bestPriority = 5
-                Write-Host "    -> Match: Premium Presentation Matte (priority 5)"
-            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 4) {{
-                $bestMatch = $id
-                $bestPriority = 4
-                Write-Host "    -> Match: Premium Matte (priority 4)"
-            }} elseif ($name -match "Presentation.*Matte" -and $bestPriority -lt 3) {{
-                $bestMatch = $id
-                $bestPriority = 3
-                Write-Host "    -> Match: Presentation Matte (priority 3)"
-            }} elseif ($name -match "Matte" -and $bestPriority -lt 2) {{
-                $bestMatch = $id
-                $bestPriority = 2
-                Write-Host "    -> Match: Matte (priority 2)"
-            }} elseif ($name -match "Photo" -and $bestPriority -lt 1) {{
-                $bestMatch = $id
-                $bestPriority = 1
-                Write-Host "    -> Match: Photo (priority 1)"
-            }}
+            $mediaTypeIds += $id
+            Write-Host "  Media type ID: $id"
         }}
 
-        if ($bestMatch -ne $null) {{
-            $mediaTypeId = $bestMatch
-            Write-Host "Selected media type ID: $mediaTypeId"
+        # Priority matching by known Epson media type IDs
+        # 258 = Premium Presentation Matte (BEST for labels)
+        # 261 = Premium Glossy/Photo
+        # 257 = Matte Paper
+        # 260 = Glossy Photo Paper
+        # 3   = Standard Matte (DMMEDIA_MATTE)
+        if ($mediaTypeIds -contains 258) {{
+            $mediaTypeId = 258
+            Write-Host "SELECTED: Premium Presentation Matte (ID 258)"
+        }} elseif ($mediaTypeIds -contains 261) {{
+            $mediaTypeId = 261
+            Write-Host "SELECTED: Premium Glossy (ID 261)"
+        }} elseif ($mediaTypeIds -contains 257) {{
+            $mediaTypeId = 257
+            Write-Host "SELECTED: Matte Paper (ID 257)"
+        }} elseif ($mediaTypeIds -contains 260) {{
+            $mediaTypeId = 260
+            Write-Host "SELECTED: Glossy Photo (ID 260)"
+        }} elseif ($mediaTypeIds -contains 3) {{
+            $mediaTypeId = 3
+            Write-Host "SELECTED: Standard Matte (ID 3)"
         }} else {{
-            Write-Host "No matte paper found, using default (0)"
+            Write-Host "WARNING: No known matte paper type found, using default"
         }}
     }} finally {{
         [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
     }}
 }}
 
@@ -649,7 +630,6 @@ public class DevModeHelper {{
 
     // DeviceCapabilities constants
     public const ushort DC_MEDIATYPES = 35;
-    public const ushort DC_MEDIATYPENAMES = 36;
 }}
 '@
 
@@ -670,7 +650,8 @@ $printDoc.PrinterSettings.PrinterName = $printerName
 $printDoc.PrinterSettings.Copies = $copies
 
 # ============================================================
-# STEP 1: Query available media types from printer
+# STEP 1: Query media type IDs only (NO names - they corrupt!)
+# Use hardcoded Epson media type IDs for reliable matching
 # ============================================================
 Write-Host "`n=== QUERYING MEDIA TYPES ==="
 
@@ -681,48 +662,44 @@ if ($count -gt 0) {{
     Write-Host "Found $count media types"
 
     $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
-    $nameBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 128)
 
     try {{
         [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
-        [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPENAMES, $nameBuffer, [IntPtr]::Zero) | Out-Null
 
-        $bestMatch = $null
-        $bestPriority = 0
-
+        # Collect all media type IDs
+        $mediaTypeIds = @()
         for ($i = 0; $i -lt $count; $i++) {{
             $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
-            $namePtr = [IntPtr]::Add($nameBuffer, $i * 128)
-            $name = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($namePtr, 64).TrimEnd([char]0)
-
-            Write-Host "  [$i] ID=$id Name='$name'"
-
-            # Priority: Photo Matte > Premium Matte > Matte > Photo
-            if ($name -match "Photo.*Matte|Matte.*Photo" -and $bestPriority -lt 6) {{
-                $bestMatch = $id
-                $bestPriority = 6
-                Write-Host "      -> BEST MATCH (Photo Matte)"
-            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 4) {{
-                $bestMatch = $id
-                $bestPriority = 4
-            }} elseif ($name -match "Matte" -and $bestPriority -lt 2) {{
-                $bestMatch = $id
-                $bestPriority = 2
-            }} elseif ($name -match "Photo" -and $bestPriority -lt 1) {{
-                $bestMatch = $id
-                $bestPriority = 1
-            }}
+            $mediaTypeIds += $id
+            Write-Host "  Media type ID: $id"
         }}
 
-        if ($bestMatch -ne $null) {{
-            $mediaTypeId = $bestMatch
-            Write-Host "SELECTED MEDIA TYPE ID: $mediaTypeId"
+        # Priority matching by known Epson media type IDs
+        # 258 = Premium Presentation Matte (BEST for labels)
+        # 261 = Premium Glossy/Photo
+        # 257 = Matte Paper
+        # 260 = Glossy Photo Paper
+        # 3   = Standard Matte (DMMEDIA_MATTE)
+        if ($mediaTypeIds -contains 258) {{
+            $mediaTypeId = 258
+            Write-Host "SELECTED: Premium Presentation Matte (ID 258)"
+        }} elseif ($mediaTypeIds -contains 261) {{
+            $mediaTypeId = 261
+            Write-Host "SELECTED: Premium Glossy (ID 261)"
+        }} elseif ($mediaTypeIds -contains 257) {{
+            $mediaTypeId = 257
+            Write-Host "SELECTED: Matte Paper (ID 257)"
+        }} elseif ($mediaTypeIds -contains 260) {{
+            $mediaTypeId = 260
+            Write-Host "SELECTED: Glossy Photo (ID 260)"
+        }} elseif ($mediaTypeIds -contains 3) {{
+            $mediaTypeId = 3
+            Write-Host "SELECTED: Standard Matte (ID 3)"
         }} else {{
-            Write-Host "WARNING: No matching media type found, using default"
+            Write-Host "WARNING: No known matte paper type found, using default"
         }}
     }} finally {{
         [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
     }}
 }} else {{
     Write-Host "WARNING: Could not query media types"
@@ -792,10 +769,11 @@ $printHandler = {{
     $drawWidth = $imgWidth * $scaleFactor
     $drawHeight = $imgHeight * $scaleFactor
 
-    Write-Host "Drawing: $drawWidth x $drawHeight units"
+    Write-Host "Drawing: $drawWidth x $drawHeight units at origin (0,0)"
 
-    $x = 10
-    $y = 10
+    # Position at origin for label printing (no offset!)
+    $x = 0
+    $y = 0
 
     $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
