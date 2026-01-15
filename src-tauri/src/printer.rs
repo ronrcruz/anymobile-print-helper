@@ -425,7 +425,8 @@ if ($count -gt 0) {{
         [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
         [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPENAMES, $nameBuffer, [IntPtr]::Zero) | Out-Null
 
-        # Find best match: Premium Matte > Presentation Matte > Matte > any
+        # Find best match for high-quality matte/photo paper
+        # Priority: Photo Matte > Premium Matte > Matte > Photo > Plain
         $bestMatch = $null
         $bestPriority = 0
 
@@ -436,23 +437,31 @@ if ($count -gt 0) {{
 
             Write-Host "  Media type $i : ID=$id, Name='$name'"
 
-            # Priority matching
-            if ($name -match "Premium.*Presentation.*Matte" -and $bestPriority -lt 4) {{
+            # Priority matching - Photo Matte is typically best for labels
+            if ($name -match "Photo.*Matte|Matte.*Photo" -and $bestPriority -lt 6) {{
+                $bestMatch = $id
+                $bestPriority = 6
+                Write-Host "    -> Best match: Photo Matte (priority 6)"
+            }} elseif ($name -match "Premium.*Presentation.*Matte" -and $bestPriority -lt 5) {{
+                $bestMatch = $id
+                $bestPriority = 5
+                Write-Host "    -> Match: Premium Presentation Matte (priority 5)"
+            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 4) {{
                 $bestMatch = $id
                 $bestPriority = 4
-                Write-Host "    -> Best match (priority 4)"
-            }} elseif ($name -match "Premium.*Matte" -and $bestPriority -lt 3) {{
+                Write-Host "    -> Match: Premium Matte (priority 4)"
+            }} elseif ($name -match "Presentation.*Matte" -and $bestPriority -lt 3) {{
                 $bestMatch = $id
                 $bestPriority = 3
-                Write-Host "    -> Match (priority 3)"
-            }} elseif ($name -match "Presentation.*Matte" -and $bestPriority -lt 2) {{
+                Write-Host "    -> Match: Presentation Matte (priority 3)"
+            }} elseif ($name -match "Matte" -and $bestPriority -lt 2) {{
                 $bestMatch = $id
                 $bestPriority = 2
-                Write-Host "    -> Match (priority 2)"
-            }} elseif ($name -match "Matte" -and $bestPriority -lt 1) {{
+                Write-Host "    -> Match: Matte (priority 2)"
+            }} elseif ($name -match "Photo" -and $bestPriority -lt 1) {{
                 $bestMatch = $id
                 $bestPriority = 1
-                Write-Host "    -> Match (priority 1)"
+                Write-Host "    -> Match: Photo (priority 1)"
             }}
         }}
 
