@@ -2,11 +2,12 @@ fn main() {
     // Embed Windows manifest requesting administrator privileges
     #[cfg(windows)]
     {
-        let mut res = winres::WindowsResource::new();
-        res.set_manifest_file("app.manifest");
-        if let Err(e) = res.compile() {
-            eprintln!("Warning: Failed to compile Windows resources: {}", e);
-        }
+        use embed_manifest::{embed_manifest, new_manifest, manifest::ExecutionLevel};
+
+        embed_manifest(
+            new_manifest("AnyMobile Print Helper")
+                .requested_execution_level(ExecutionLevel::RequireAdministrator)
+        ).expect("Failed to embed Windows manifest");
     }
 
     tauri_build::build()
