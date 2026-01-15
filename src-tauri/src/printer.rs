@@ -601,8 +601,8 @@ fn render_pdf_to_png(
     Ok(output_path)
 }
 
-/// Print an image file using Windows GDI with proper DEVMODE settings
-/// This gives us full control over print quality since we pre-rendered at 600 DPI
+/// Print an image file using Windows GDI with PrinterResolution set DIRECTLY
+/// KEY FIX: Sets resolution on PrintDocument itself, not via separate DEVMODE
 #[cfg(target_os = "windows")]
 fn print_image_windows(
     image_path: &std::path::Path,
@@ -612,8 +612,8 @@ fn print_image_windows(
     tracing::info!("Printing image via Windows GDI: {:?}", image_path);
     tracing::info!("Printer: {}, Copies: {}", printer_name, copies);
 
-    // Use PowerShell with .NET System.Drawing.Printing for proper print control
-    // This respects DEVMODE settings we configured earlier
+    // Use PowerShell with .NET System.Drawing.Printing
+    // KEY: Set PrinterResolution DIRECTLY on PrintDocument (not separate DEVMODE!)
     let ps_script = format!(r#"
 Add-Type -AssemblyName System.Drawing
 
@@ -629,35 +629,80 @@ $printDoc = New-Object System.Drawing.Printing.PrintDocument
 $printDoc.PrinterSettings.PrinterName = $printerName
 $printDoc.PrinterSettings.Copies = $copies
 
-# Set to print actual size (no scaling)
+# ============================================================
+# KEY FIX: Set PrinterResolution DIRECTLY on the PrintDocument!
+# This was the bug - we were setting DEVMODE separately but
+# PrintDocument uses its own settings, ignoring our DEVMODE.
+# ============================================================
+
+Write-Host "Available printer resolutions:"
+$bestRes = $null
+$bestDpi = 0
+
+foreach ($res in $printDoc.PrinterSettings.PrinterResolutions) {{
+    $resX = $res.X
+    $resY = $res.Y
+    $kind = $res.Kind
+    Write-Host "  Resolution: $resX x $resY (Kind: $kind)"
+
+    # Find the highest resolution available
+    if ($resX -gt 0 -and $resX -ge $bestDpi) {{
+        $bestDpi = $resX
+        $bestRes = $res
+    }}
+    # Prefer "High" quality kind
+    if ($kind -eq [System.Drawing.Printing.PrinterResolutionKind]::High) {{
+        $bestRes = $res
+        $bestDpi = 9999  # High quality takes priority
+    }}
+}}
+
+if ($bestRes -ne $null) {{
+    $printDoc.DefaultPageSettings.PrinterResolution = $bestRes
+    Write-Host "SELECTED RESOLUTION: $($bestRes.X) x $($bestRes.Y) (Kind: $($bestRes.Kind))"
+}} else {{
+    Write-Host "WARNING: Could not find a suitable resolution"
+}}
+
+# Enable color printing
+$printDoc.DefaultPageSettings.Color = $true
+Write-Host "Color printing: Enabled"
+
+# Set zero margins for labels
 $printDoc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
 
 # Print handler - draws the pre-rendered 600 DPI image
 $printHandler = {{
     param($sender, $e)
 
-    # Get page bounds
+    # Get printable area
     $pageBounds = $e.PageBounds
+    $marginBounds = $e.MarginBounds
 
-    # Calculate position to center the image on the page
-    # The image is already at 600 DPI, so we draw it at its natural size
+    # Image dimensions
     $imgWidth = $image.Width
     $imgHeight = $image.Height
 
-    # Convert from 600 DPI image pixels to printer units (100 DPI base)
-    # Printer graphics are at 100 units per inch by default
+    # The image is rendered at 600 DPI
+    # PrintDocument graphics are in 1/100 inch units
+    # So a 600 DPI image that's 2400 pixels wide = 4 inches = 400 units
     $scaleFactor = 100.0 / 600.0
     $drawWidth = $imgWidth * $scaleFactor
     $drawHeight = $imgHeight * $scaleFactor
 
-    # Center on page
-    $x = ($pageBounds.Width - $drawWidth) / 2
-    $y = ($pageBounds.Height - $drawHeight) / 2
+    Write-Host "Image: $imgWidth x $imgHeight pixels"
+    Write-Host "Draw size: $drawWidth x $drawHeight units (1/100 inch)"
+    Write-Host "Page bounds: $($pageBounds.Width) x $($pageBounds.Height)"
 
-    # Draw with high quality interpolation
+    # Position at top-left with small margin for labels
+    $x = 10
+    $y = 10
+
+    # Set high quality rendering
     $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
     $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $e.Graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 
     # Draw the image
     $destRect = New-Object System.Drawing.RectangleF($x, $y, $drawWidth, $drawHeight)
@@ -670,6 +715,7 @@ $printHandler = {{
 $printDoc.add_PrintPage($printHandler)
 
 try {{
+    Write-Host "Sending print job to: $printerName"
     $printDoc.Print()
     Write-Host "SUCCESS: Print job sent to $printerName"
 }} catch {{
