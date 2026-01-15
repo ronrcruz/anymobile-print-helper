@@ -359,69 +359,75 @@ async fn ensure_sumatra_available() -> Result<PathBuf, Box<dyn std::error::Error
     Ok(sumatra_path)
 }
 
-/// Configure printer for high-quality label printing (600 DPI, Matte paper)
-/// This modifies the printer's DEVMODE settings before SumatraPDF prints
+/// Set printer defaults using SetPrinter API to PERSIST settings
+/// This is the CORRECT way - Ghostscript mswinpr2 uses printer's current defaults
 #[cfg(target_os = "windows")]
-fn configure_printer_quality(printer_name: &str) -> Result<(), String> {
-    tracing::info!("Configuring printer quality for: {}", printer_name);
+fn set_printer_defaults(printer_name: &str) -> Result<(), String> {
+    tracing::info!("Setting printer defaults (PERSISTENT) for: {}", printer_name);
 
-    // PowerShell script that:
-    // 1. Queries supported media types from the printer
-    // 2. Finds "Matte" or "Premium" paper type
-    // 3. Sets 600 DPI and the discovered media type via DEVMODE
+    // PowerShell script that uses SetPrinter to PERSIST DEVMODE to printer defaults
+    // Per Microsoft KB: https://support.microsoft.com/en-gb/help/140285
     let ps_script = format!(r#"
 $ErrorActionPreference = 'Stop'
 $printerName = '{}'
 
-# Add .NET types for printer configuration
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public class PrinterConfig {{
+public class PrinterDefaults {{
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool OpenPrinter(string pPrinterName, out IntPtr hPrinter, IntPtr pDefault);
+
+    [DllImport("winspool.drv", SetLastError = true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool GetPrinter(IntPtr hPrinter, int level, IntPtr pPrinter, int cbBuf, out int pcbNeeded);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool SetPrinter(IntPtr hPrinter, int level, IntPtr pPrinter, int command);
 
     [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
     public static extern int DocumentProperties(IntPtr hwnd, IntPtr hPrinter, string pDeviceName,
         IntPtr pDevModeOutput, IntPtr pDevModeInput, int fMode);
 
-    [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool ClosePrinter(IntPtr hPrinter);
-
     [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
     public static extern int DeviceCapabilities(string pDevice, string pPort,
         ushort fwCapability, IntPtr pOutput, IntPtr pDevMode);
+
+    // PRINTER_INFO_2 pDevMode offset (64-bit: 8 bytes in)
+    public const int PRINTER_INFO_2_pDevMode_offset = 64;
+
+    // DEVMODE offsets
+    public const int dmFields_offset = 40;
+    public const int dmPrintQuality_offset = 58;
+    public const int dmYResolution_offset = 60;
+    public const int dmMediaType_offset = 62;
+
+    // DEVMODE flags
+    public const int DM_PRINTQUALITY = 0x0400;
+    public const int DM_YRESOLUTION = 0x2000;
+    public const int DM_MEDIATYPE = 0x0200;
+
+    // DeviceCapabilities
+    public const ushort DC_MEDIATYPES = 35;
 }}
 '@
 
-# DeviceCapabilities constants
-$DC_MEDIATYPES = 35
+Write-Host "=== PERSISTING PRINTER DEFAULTS ==="
 
-# DEVMODE field offsets (64-bit Windows)
-$dmFields_offset = 40
-$dmPrintQuality_offset = 58
-$dmYResolution_offset = 60
-$dmMediaType_offset = 62
-
-# DEVMODE field flags
-$DM_PRINTQUALITY = 0x0400
-$DM_YRESOLUTION = 0x2000
-$DM_MEDIATYPE = 0x0200
-
-# Step 1: Query media type IDs only (NO names - they corrupt!)
-$mediaTypeId = 0  # Default to plain paper
-$count = [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
+# Step 1: Query media type IDs to find best match
+$mediaTypeId = 258  # Default to Premium Presentation Matte
+$count = [PrinterDefaults]::DeviceCapabilities($printerName, $null, [PrinterDefaults]::DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
 
 if ($count -gt 0) {{
     Write-Host "Found $count media types"
-
     $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
 
     try {{
-        [PrinterConfig]::DeviceCapabilities($printerName, $null, $DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
+        [PrinterDefaults]::DeviceCapabilities($printerName, $null, [PrinterDefaults]::DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
 
-        # Collect all media type IDs
         $mediaTypeIds = @()
         for ($i = 0; $i -lt $count; $i++) {{
             $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
@@ -429,12 +435,7 @@ if ($count -gt 0) {{
             Write-Host "  Media type ID: $id"
         }}
 
-        # Priority matching by known Epson media type IDs
-        # 258 = Premium Presentation Matte (BEST for labels)
-        # 261 = Premium Glossy/Photo
-        # 257 = Matte Paper
-        # 260 = Glossy Photo Paper
-        # 3   = Standard Matte (DMMEDIA_MATTE)
+        # Priority: 258 (Premium Matte) > 261 > 257 > 260 > 3
         if ($mediaTypeIds -contains 258) {{
             $mediaTypeId = 258
             Write-Host "SELECTED: Premium Presentation Matte (ID 258)"
@@ -444,68 +445,77 @@ if ($count -gt 0) {{
         }} elseif ($mediaTypeIds -contains 257) {{
             $mediaTypeId = 257
             Write-Host "SELECTED: Matte Paper (ID 257)"
-        }} elseif ($mediaTypeIds -contains 260) {{
-            $mediaTypeId = 260
-            Write-Host "SELECTED: Glossy Photo (ID 260)"
         }} elseif ($mediaTypeIds -contains 3) {{
             $mediaTypeId = 3
             Write-Host "SELECTED: Standard Matte (ID 3)"
-        }} else {{
-            Write-Host "WARNING: No known matte paper type found, using default"
         }}
     }} finally {{
         [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
     }}
 }}
 
-# Step 2: Open printer and modify DEVMODE
+# Step 2: Open printer and get PRINTER_INFO_2
 $hPrinter = [IntPtr]::Zero
-if ([PrinterConfig]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {{
+if (-not [PrinterDefaults]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {{
+    Write-Host "ERROR: Could not open printer"
+    exit 1
+}}
+
+try {{
+    # Get PRINTER_INFO_2 size
+    $needed = 0
+    [PrinterDefaults]::GetPrinter($hPrinter, 2, [IntPtr]::Zero, 0, [ref]$needed) | Out-Null
+    Write-Host "PRINTER_INFO_2 size: $needed bytes"
+
+    $pInfo2 = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($needed)
+
     try {{
-        # Get DEVMODE size
-        $size = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, [IntPtr]::Zero, [IntPtr]::Zero, 0)
-        Write-Host "DEVMODE size: $size bytes"
+        if (-not [PrinterDefaults]::GetPrinter($hPrinter, 2, $pInfo2, $needed, [ref]$needed)) {{
+            Write-Host "ERROR: GetPrinter failed"
+            exit 1
+        }}
 
-        if ($size -gt 0) {{
-            $pDevMode = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+        # Get pDevMode pointer from PRINTER_INFO_2 (offset varies by struct)
+        # On x64, pDevMode is at offset 64 in PRINTER_INFO_2
+        $pDevMode = [System.Runtime.InteropServices.Marshal]::ReadIntPtr($pInfo2, [PrinterDefaults]::PRINTER_INFO_2_pDevMode_offset)
 
-            try {{
-                # Get current DEVMODE (DM_OUT_BUFFER = 2)
-                $result = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, [IntPtr]::Zero, 2)
+        if ($pDevMode -eq [IntPtr]::Zero) {{
+            Write-Host "ERROR: pDevMode is null"
+            exit 1
+        }}
 
-                if ($result -ge 0) {{
-                    # Read and modify dmFields
-                    $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, $dmFields_offset)
-                    $dmFields = $dmFields -bor $DM_PRINTQUALITY -bor $DM_YRESOLUTION -bor $DM_MEDIATYPE
-                    [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, $dmFields_offset, $dmFields)
+        Write-Host "pDevMode pointer: $pDevMode"
 
-                    # Set 600 DPI
-                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmPrintQuality_offset, 600)
-                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmYResolution_offset, 600)
+        # Modify DEVMODE fields
+        $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, [PrinterDefaults]::dmFields_offset)
+        $dmFields = $dmFields -bor [PrinterDefaults]::DM_PRINTQUALITY -bor [PrinterDefaults]::DM_YRESOLUTION -bor [PrinterDefaults]::DM_MEDIATYPE
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, [PrinterDefaults]::dmFields_offset, $dmFields)
 
-                    # Set media type
-                    [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, $dmMediaType_offset, $mediaTypeId)
+        # Set 600 DPI
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmPrintQuality_offset, 600)
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmYResolution_offset, 600)
+        Write-Host "Set resolution: 600 x 600 DPI"
 
-                    # Apply settings (DM_IN_BUFFER | DM_OUT_BUFFER = 10)
-                    $result = [PrinterConfig]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, $pDevMode, 10)
+        # Set media type
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmMediaType_offset, $mediaTypeId)
+        Write-Host "Set media type: $mediaTypeId"
 
-                    if ($result -eq 1) {{
-                        Write-Host "SUCCESS: Configured 600 DPI, MediaType=$mediaTypeId"
-                    }} else {{
-                        Write-Host "WARNING: DocumentProperties returned $result (settings may not persist)"
-                    }}
-                }} else {{
-                    Write-Host "ERROR: Failed to get DEVMODE (result=$result)"
-                }}
-            }} finally {{
-                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pDevMode)
-            }}
+        # Validate DEVMODE via DocumentProperties
+        $result = [PrinterDefaults]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, $pDevMode, 10)
+        Write-Host "DocumentProperties result: $result"
+
+        # PERSIST via SetPrinter!
+        if ([PrinterDefaults]::SetPrinter($hPrinter, 2, $pInfo2, 0)) {{
+            Write-Host "SUCCESS: Printer defaults PERSISTED (MediaType=$mediaTypeId, DPI=600)"
+        }} else {{
+            $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "WARNING: SetPrinter returned false (error=$err) - may need admin rights"
         }}
     }} finally {{
-        [PrinterConfig]::ClosePrinter($hPrinter) | Out-Null
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pInfo2)
     }}
-}} else {{
-    Write-Host "ERROR: Could not open printer '$printerName'"
+}} finally {{
+    [PrinterDefaults]::ClosePrinter($hPrinter) | Out-Null
 }}
 "#, printer_name);
 
@@ -533,301 +543,8 @@ if ([PrinterConfig]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) 
     }
 }
 
-/// Render PDF to high-resolution PNG using Ghostscript's png16m device
-/// Unlike mswinpr2, the png16m device ACTUALLY respects the -r flag for resolution!
-#[cfg(target_os = "windows")]
-fn render_pdf_to_png(
-    pdf_path: &str,
-    gs_path: &std::path::Path,
-    dpi: u32,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let temp_dir = std::env::temp_dir();
-    let output_path = temp_dir.join(format!("print_label_{}.png", Uuid::new_v4()));
-
-    tracing::info!("Rendering PDF to {} DPI PNG: {:?}", dpi, output_path);
-
-    let args = vec![
-        "-dBATCH".to_string(),
-        "-dNOPAUSE".to_string(),
-        "-dSAFER".to_string(),
-        "-sDEVICE=png16m".to_string(),           // 24-bit color PNG (actually respects -r!)
-        format!("-r{}", dpi),                     // Resolution - THIS WORKS for png16m!
-        "-dTextAlphaBits=4".to_string(),          // Text anti-aliasing
-        "-dGraphicsAlphaBits=4".to_string(),      // Graphics anti-aliasing
-        format!("-sOutputFile={}", output_path.display()),
-        pdf_path.to_string(),
-    ];
-
-    tracing::debug!("Ghostscript render args: {:?}", args);
-
-    let output = Command::new(gs_path)
-        .args(&args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-
-    if !output.status.success() {
-        let err = format!(
-            "Failed to render PDF to PNG: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        tracing::error!("{}", err);
-        return Err(err.into());
-    }
-
-    if !output_path.exists() {
-        return Err("PNG file was not created".into());
-    }
-
-    tracing::info!("PNG rendered successfully: {:?}", output_path);
-    Ok(output_path)
-}
-
-/// Print an image file using Windows GDI with PAPER TYPE set via DEVMODE
-/// KEY FIX: Uses GetHdevmode/SetHdevmode to set dmMediaType (paper type) DIRECTLY!
-#[cfg(target_os = "windows")]
-fn print_image_windows(
-    image_path: &std::path::Path,
-    printer_name: &str,
-    copies: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("Printing image via Windows GDI: {:?}", image_path);
-    tracing::info!("Printer: {}, Copies: {}", printer_name, copies);
-
-    // Use PowerShell with .NET System.Drawing.Printing
-    // KEY FIX: Set PAPER TYPE (dmMediaType) via GetHdevmode/SetHdevmode!
-    let ps_script = format!(r#"
-Add-Type -AssemblyName System.Drawing
-
-# P/Invoke for DEVMODE manipulation
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public class DevModeHelper {{
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GlobalLock(IntPtr hMem);
-
-    [DllImport("kernel32.dll")]
-    public static extern bool GlobalUnlock(IntPtr hMem);
-
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GlobalFree(IntPtr hMem);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
-    public static extern int DeviceCapabilities(string pDevice, string pPort,
-        ushort fwCapability, IntPtr pOutput, IntPtr pDevMode);
-
-    // DEVMODE field offsets (64-bit)
-    public const int dmFields_offset = 40;
-    public const int dmPrintQuality_offset = 58;
-    public const int dmYResolution_offset = 60;
-    public const int dmMediaType_offset = 62;
-
-    // DEVMODE field flags
-    public const int DM_PRINTQUALITY = 0x0400;
-    public const int DM_YRESOLUTION = 0x2000;
-    public const int DM_MEDIATYPE = 0x0200;
-
-    // DeviceCapabilities constants
-    public const ushort DC_MEDIATYPES = 35;
-}}
-'@
-
-$imagePath = '{}'
-$printerName = '{}'
-$copies = {}
-
-Write-Host "=== PRINT JOB START ==="
-Write-Host "Image: $imagePath"
-Write-Host "Printer: $printerName"
-
-# Load the image
-$image = [System.Drawing.Image]::FromFile($imagePath)
-
-# Create print document
-$printDoc = New-Object System.Drawing.Printing.PrintDocument
-$printDoc.PrinterSettings.PrinterName = $printerName
-$printDoc.PrinterSettings.Copies = $copies
-
-# ============================================================
-# STEP 1: Query media type IDs only (NO names - they corrupt!)
-# Use hardcoded Epson media type IDs for reliable matching
-# ============================================================
-Write-Host "`n=== QUERYING MEDIA TYPES ==="
-
-$mediaTypeId = 0
-$count = [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
-
-if ($count -gt 0) {{
-    Write-Host "Found $count media types"
-
-    $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
-
-    try {{
-        [DevModeHelper]::DeviceCapabilities($printerName, $null, [DevModeHelper]::DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
-
-        # Collect all media type IDs
-        $mediaTypeIds = @()
-        for ($i = 0; $i -lt $count; $i++) {{
-            $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
-            $mediaTypeIds += $id
-            Write-Host "  Media type ID: $id"
-        }}
-
-        # Priority matching by known Epson media type IDs
-        # 258 = Premium Presentation Matte (BEST for labels)
-        # 261 = Premium Glossy/Photo
-        # 257 = Matte Paper
-        # 260 = Glossy Photo Paper
-        # 3   = Standard Matte (DMMEDIA_MATTE)
-        if ($mediaTypeIds -contains 258) {{
-            $mediaTypeId = 258
-            Write-Host "SELECTED: Premium Presentation Matte (ID 258)"
-        }} elseif ($mediaTypeIds -contains 261) {{
-            $mediaTypeId = 261
-            Write-Host "SELECTED: Premium Glossy (ID 261)"
-        }} elseif ($mediaTypeIds -contains 257) {{
-            $mediaTypeId = 257
-            Write-Host "SELECTED: Matte Paper (ID 257)"
-        }} elseif ($mediaTypeIds -contains 260) {{
-            $mediaTypeId = 260
-            Write-Host "SELECTED: Glossy Photo (ID 260)"
-        }} elseif ($mediaTypeIds -contains 3) {{
-            $mediaTypeId = 3
-            Write-Host "SELECTED: Standard Matte (ID 3)"
-        }} else {{
-            Write-Host "WARNING: No known matte paper type found, using default"
-        }}
-    }} finally {{
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
-    }}
-}} else {{
-    Write-Host "WARNING: Could not query media types"
-}}
-
-# ============================================================
-# STEP 2: Get DEVMODE and modify paper type + resolution
-# ============================================================
-Write-Host "`n=== APPLYING DEVMODE SETTINGS ==="
-
-try {{
-    # Get DEVMODE handle from PrinterSettings
-    $hDevMode = $printDoc.PrinterSettings.GetHdevmode($printDoc.DefaultPageSettings)
-    $pDevMode = [DevModeHelper]::GlobalLock($hDevMode)
-
-    if ($pDevMode -ne [IntPtr]::Zero) {{
-        # Read current dmFields
-        $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, [DevModeHelper]::dmFields_offset)
-
-        # Add our flags
-        $dmFields = $dmFields -bor [DevModeHelper]::DM_PRINTQUALITY -bor [DevModeHelper]::DM_YRESOLUTION -bor [DevModeHelper]::DM_MEDIATYPE
-
-        # Write back dmFields
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, [DevModeHelper]::dmFields_offset, $dmFields)
-
-        # Set 600 DPI
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmPrintQuality_offset, 600)
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmYResolution_offset, 600)
-        Write-Host "Set resolution: 600 x 600 DPI"
-
-        # Set media type (PAPER TYPE - THE KEY FIX!)
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [DevModeHelper]::dmMediaType_offset, $mediaTypeId)
-        Write-Host "Set media type (PAPER TYPE): $mediaTypeId"
-
-        [DevModeHelper]::GlobalUnlock($hDevMode) | Out-Null
-
-        # Apply DEVMODE back to PrinterSettings AND PageSettings
-        $printDoc.PrinterSettings.SetHdevmode($hDevMode)
-        $printDoc.DefaultPageSettings.SetHdevmode($hDevMode)
-        Write-Host "DEVMODE applied to PrintDocument!"
-
-        [DevModeHelper]::GlobalFree($hDevMode) | Out-Null
-    }} else {{
-        Write-Host "ERROR: Could not lock DEVMODE"
-    }}
-}} catch {{
-    Write-Host "WARNING: DEVMODE modification failed: $($_.Exception.Message)"
-}}
-
-# ============================================================
-# STEP 3: Set other print settings
-# ============================================================
-$printDoc.DefaultPageSettings.Color = $true
-$printDoc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
-
-# ============================================================
-# STEP 4: Print handler
-# ============================================================
-$printHandler = {{
-    param($sender, $e)
-
-    $imgWidth = $image.Width
-    $imgHeight = $image.Height
-
-    # 600 DPI image to 1/100 inch units
-    $scaleFactor = 100.0 / 600.0
-    $drawWidth = $imgWidth * $scaleFactor
-    $drawHeight = $imgHeight * $scaleFactor
-
-    Write-Host "Drawing: $drawWidth x $drawHeight units at origin (0,0)"
-
-    # Position at origin for label printing (no offset!)
-    $x = 0
-    $y = 0
-
-    $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-    $e.Graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-
-    $destRect = New-Object System.Drawing.RectangleF($x, $y, $drawWidth, $drawHeight)
-    $srcRect = New-Object System.Drawing.RectangleF(0, 0, $imgWidth, $imgHeight)
-    $e.Graphics.DrawImage($image, $destRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
-
-    $e.HasMorePages = $false
-}}
-
-$printDoc.add_PrintPage($printHandler)
-
-try {{
-    Write-Host "`n=== SENDING PRINT JOB ==="
-    $printDoc.Print()
-    Write-Host "SUCCESS: Print job sent with MediaType=$mediaTypeId, Resolution=600 DPI"
-}} catch {{
-    Write-Host "ERROR: $($_.Exception.Message)"
-}} finally {{
-    $image.Dispose()
-    $printDoc.Dispose()
-}}
-"#, image_path.display().to_string().replace("\\", "\\\\").replace("'", "''"),
-    printer_name.replace("'", "''"),
-    copies);
-
-    let output = Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", &ps_script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    tracing::info!("Print output: {}", stdout);
-    if !stderr.is_empty() {
-        tracing::warn!("Print stderr: {}", stderr);
-    }
-
-    if stdout.contains("SUCCESS") {
-        Ok(())
-    } else if stdout.contains("ERROR") {
-        Err(format!("Print failed: {}", stdout).into())
-    } else {
-        // Assume success if no explicit error
-        Ok(())
-    }
-}
-
-/// Print PDF using Ghostscript with TWO-STEP RENDERING for guaranteed quality
-/// Step 1: Render PDF to 600 DPI PNG (png16m device respects -r flag!)
-/// Step 2: Print PNG using Windows GDI with proper DEVMODE
+/// Print PDF using Ghostscript mswinpr2 - DIRECT printing at ACTUAL SIZE
+/// Settings are PERSISTED to printer defaults via SetPrinter before printing
 #[cfg(target_os = "windows")]
 async fn print_pdf_ghostscript(
     pdf_path: &str,
@@ -835,7 +552,7 @@ async fn print_pdf_ghostscript(
     copies: u32,
     gs_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("=== WINDOWS PRINT (Two-Step High Quality) ===");
+    tracing::info!("=== WINDOWS PRINT (Direct mswinpr2) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
@@ -855,28 +572,53 @@ async fn print_pdf_ghostscript(
 
     tracing::info!("Using printer: {}", printer);
 
-    // Step 1: Configure DEVMODE for the printer (600 DPI, Photo Matte paper)
-    tracing::info!("Step 1: Configuring printer DEVMODE...");
-    match configure_printer_quality(&printer) {
-        Ok(()) => tracing::info!("DEVMODE configured: 600 DPI + Photo Matte paper"),
-        Err(e) => tracing::warn!("DEVMODE config warning: {}. Continuing with pre-rendered quality.", e),
+    // Step 1: PERSIST printer settings via SetPrinter API
+    // This sets paper type and resolution in the printer's defaults
+    tracing::info!("Step 1: Persisting printer defaults (SetPrinter)...");
+    match set_printer_defaults(&printer) {
+        Ok(()) => tracing::info!("Printer defaults PERSISTED: 600 DPI + Premium Matte"),
+        Err(e) => tracing::warn!("SetPrinter warning: {}. Continuing anyway.", e),
     }
 
-    // Step 2: Render PDF to 600 DPI PNG
-    // This is the KEY - png16m device ACTUALLY respects the -r flag unlike mswinpr2!
-    tracing::info!("Step 2: Rendering PDF to 600 DPI PNG...");
-    let png_path = render_pdf_to_png(pdf_path, gs_path, 600)?;
+    // Step 2: Print PDF directly via Ghostscript mswinpr2
+    // mswinpr2 uses the printer's current defaults (which we just set)
+    tracing::info!("Step 2: Printing PDF directly via mswinpr2...");
 
-    // Step 3: Print the PNG using Windows GDI
-    tracing::info!("Step 3: Printing PNG via Windows GDI...");
-    let print_result = print_image_windows(&png_path, &printer, copies);
+    let args = vec![
+        "-dBATCH".to_string(),
+        "-dNOPAUSE".to_string(),
+        "-dNOSAFER".to_string(),
+        "-sDEVICE=mswinpr2".to_string(),
+        format!("-sOutputFile=%printer%{}", printer),
+        "-dFitPage=false".to_string(),           // ACTUAL SIZE - no scaling!
+        format!("-dNumCopies={}", copies),
+        pdf_path.to_string(),
+    ];
 
-    // Step 4: Cleanup temp file
-    if let Err(e) = std::fs::remove_file(&png_path) {
-        tracing::warn!("Failed to cleanup temp PNG: {}", e);
+    tracing::debug!("Ghostscript args: {:?}", args);
+
+    let output = Command::new(gs_path)
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    tracing::info!("Ghostscript stdout: {}", stdout);
+    if !stderr.is_empty() {
+        tracing::warn!("Ghostscript stderr: {}", stderr);
     }
 
-    print_result?;
+    if !output.status.success() {
+        let err_msg = format!(
+            "Ghostscript print failed (exit code {:?}): {}",
+            output.status.code(),
+            stderr
+        );
+        tracing::error!("{}", err_msg);
+        return Err(err_msg.into());
+    }
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
     Ok(())
