@@ -496,34 +496,38 @@ fn print_image_with_devmode(
         }
 
         // Step 4: Modify DEVMODE for our settings using raw memory offsets
-        // DEVMODE structure offsets (fixed for Unicode version):
-        // dmFields is at offset 40 (4 bytes)
-        // dmPrintQuality is at offset 58 (2 bytes, signed)
-        // dmYResolution is at offset 60 (2 bytes)
-        // dmMediaType is at offset 62 (4 bytes)
-        // dmCopies is at offset 54 (2 bytes, in union)
+        // DEVMODEW (Unicode) structure offsets:
+        // dmDeviceName: 0-63 (WCHAR[32] = 64 bytes)
+        // dmSpecVersion: 64, dmDriverVersion: 66, dmSize: 68, dmDriverExtra: 70
+        // dmFields: 72 (DWORD)
+        // dmOrientation: 76, dmPaperSize: 78, dmPaperLength: 80, dmPaperWidth: 82
+        // dmScale: 84, dmCopies: 86, dmDefaultSource: 88, dmPrintQuality: 90
+        // dmColor: 92, dmDuplex: 94, dmYResolution: 96
+        // dmFormName: 102-165 (WCHAR[32])
+        // ... more fields ...
+        // dmMediaType: 196 (DWORD)
         let dm_bytes = devmode_buffer.as_mut_ptr();
 
-        // Read and modify dmFields
-        let dm_fields_ptr = dm_bytes.add(40) as *mut u32;
+        // Read and modify dmFields at offset 72
+        let dm_fields_ptr = dm_bytes.add(72) as *mut u32;
         let mut dm_fields = std::ptr::read_unaligned(dm_fields_ptr);
         dm_fields |= DM_PRINTQUALITY | DM_YRESOLUTION | DM_MEDIATYPE | DM_COPIES;
         std::ptr::write_unaligned(dm_fields_ptr, dm_fields);
 
-        // Set dmCopies at offset 54
-        let dm_copies_ptr = dm_bytes.add(54) as *mut i16;
+        // Set dmCopies at offset 86
+        let dm_copies_ptr = dm_bytes.add(86) as *mut i16;
         std::ptr::write_unaligned(dm_copies_ptr, copies as i16);
 
-        // Set dmPrintQuality at offset 58
-        let dm_print_quality_ptr = dm_bytes.add(58) as *mut i16;
+        // Set dmPrintQuality at offset 90
+        let dm_print_quality_ptr = dm_bytes.add(90) as *mut i16;
         std::ptr::write_unaligned(dm_print_quality_ptr, 600);
 
-        // Set dmYResolution at offset 60
-        let dm_y_resolution_ptr = dm_bytes.add(60) as *mut i16;
+        // Set dmYResolution at offset 96
+        let dm_y_resolution_ptr = dm_bytes.add(96) as *mut i16;
         std::ptr::write_unaligned(dm_y_resolution_ptr, 600);
 
-        // Set dmMediaType at offset 62 - THIS IS THE KEY SETTING!
-        let dm_media_type_ptr = dm_bytes.add(62) as *mut u32;
+        // Set dmMediaType at offset 196 - THIS IS THE KEY SETTING!
+        let dm_media_type_ptr = dm_bytes.add(196) as *mut u32;
         std::ptr::write_unaligned(dm_media_type_ptr, 258); // Premium Presentation Matte
 
         tracing::info!("Set DEVMODE: 600 DPI, MediaType=258 (Premium Matte), Copies={}", copies);
