@@ -414,14 +414,22 @@ fn print_image_with_devmode(
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Graphics::Gdi::{
-        CreateDCW, DeleteDC, SetStretchBltMode, StretchDIBits,
+        CreateDCW, DeleteDC, SetStretchBltMode, StretchDIBits, GetDeviceCaps,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, SRCCOPY,
+        HORZRES, VERTRES, LOGPIXELSX, LOGPIXELSY, DEVMODEW, RGBQUAD,
     };
     use windows::Win32::Graphics::Printing::{
-        ClosePrinter, DocumentPropertiesW, OpenPrinterW, PRINTER_DEFAULTSW,
-        DM_IN_BUFFER, DM_OUT_BUFFER,
+        ClosePrinter, DocumentPropertiesW, OpenPrinterW,
     };
-    use windows::Win32::Graphics::Gdi::{StartDocW, StartPage, EndPage, EndDoc, DOCINFOW};
+    use windows::Win32::Storage::Xps::{StartDocW, StartPage, EndPage, EndDoc, DOCINFOW};
+
+    // DEVMODE flags (constants)
+    const DM_OUT_BUFFER: u32 = 2;
+    const DM_IN_BUFFER: u32 = 8;
+    const DM_PRINTQUALITY: u32 = 0x0400;
+    const DM_YRESOLUTION: u32 = 0x2000;
+    const DM_MEDIATYPE: u32 = 0x08000000;
+    const DM_COPIES: u32 = 0x0100;
 
     tracing::info!("=== PRINTING WITH CUSTOM DEVMODE ===");
     tracing::info!("Image: {:?}", image_path);
@@ -463,7 +471,7 @@ fn print_image_with_devmode(
         );
 
         if devmode_size <= 0 {
-            ClosePrinter(hprinter)?;
+            let _ = ClosePrinter(hprinter);
             return Err("Failed to get DEVMODE size".into());
         }
 
@@ -471,7 +479,7 @@ fn print_image_with_devmode(
 
         // Step 3: Allocate and get DEVMODE
         let mut devmode_buffer = vec![0u8; devmode_size as usize];
-        let devmode_ptr = devmode_buffer.as_mut_ptr() as *mut windows::Win32::Graphics::Gdi::DEVMODEW;
+        let devmode_ptr = devmode_buffer.as_mut_ptr() as *mut DEVMODEW;
 
         let result = DocumentPropertiesW(
             None,
@@ -483,24 +491,40 @@ fn print_image_with_devmode(
         );
 
         if result < 0 {
-            ClosePrinter(hprinter)?;
+            let _ = ClosePrinter(hprinter);
             return Err("Failed to get DEVMODE".into());
         }
 
-        // Step 4: Modify DEVMODE for our settings
-        // DEVMODE field flags
-        const DM_PRINTQUALITY: u32 = 0x0400;
-        const DM_YRESOLUTION: u32 = 0x2000;
-        const DM_MEDIATYPE: u32 = 0x08000000;
-        const DM_COPIES: u32 = 0x0100;
+        // Step 4: Modify DEVMODE for our settings using raw memory offsets
+        // DEVMODE structure offsets (fixed for Unicode version):
+        // dmFields is at offset 40 (4 bytes)
+        // dmPrintQuality is at offset 58 (2 bytes, signed)
+        // dmYResolution is at offset 60 (2 bytes)
+        // dmMediaType is at offset 62 (4 bytes)
+        // dmCopies is at offset 54 (2 bytes, in union)
+        let dm_bytes = devmode_buffer.as_mut_ptr();
 
-        (*devmode_ptr).dmFields |= DM_PRINTQUALITY | DM_YRESOLUTION | DM_MEDIATYPE | DM_COPIES;
-        (*devmode_ptr).dmPrintQuality = 600;   // 600 DPI horizontal
-        (*devmode_ptr).dmYResolution = 600;    // 600 DPI vertical
-        (*devmode_ptr).Anonymous1.Anonymous1.dmCopies = copies as i16;
+        // Read and modify dmFields
+        let dm_fields_ptr = dm_bytes.add(40) as *mut u32;
+        let mut dm_fields = std::ptr::read_unaligned(dm_fields_ptr);
+        dm_fields |= DM_PRINTQUALITY | DM_YRESOLUTION | DM_MEDIATYPE | DM_COPIES;
+        std::ptr::write_unaligned(dm_fields_ptr, dm_fields);
 
-        // THE KEY SETTING: Media type 258 = Premium Presentation Matte
-        (*devmode_ptr).dmMediaType = 258;
+        // Set dmCopies at offset 54
+        let dm_copies_ptr = dm_bytes.add(54) as *mut i16;
+        std::ptr::write_unaligned(dm_copies_ptr, copies as i16);
+
+        // Set dmPrintQuality at offset 58
+        let dm_print_quality_ptr = dm_bytes.add(58) as *mut i16;
+        std::ptr::write_unaligned(dm_print_quality_ptr, 600);
+
+        // Set dmYResolution at offset 60
+        let dm_y_resolution_ptr = dm_bytes.add(60) as *mut i16;
+        std::ptr::write_unaligned(dm_y_resolution_ptr, 600);
+
+        // Set dmMediaType at offset 62 - THIS IS THE KEY SETTING!
+        let dm_media_type_ptr = dm_bytes.add(62) as *mut u32;
+        std::ptr::write_unaligned(dm_media_type_ptr, 258); // Premium Presentation Matte
 
         tracing::info!("Set DEVMODE: 600 DPI, MediaType=258 (Premium Matte), Copies={}", copies);
 
@@ -517,7 +541,7 @@ fn print_image_with_devmode(
         tracing::info!("DocumentProperties validate result: {}", result);
 
         // Close printer handle (we'll use CreateDC next)
-        ClosePrinter(hprinter)?;
+        let _ = ClosePrinter(hprinter);
 
         // Step 6: Create printer DC with OUR DEVMODE
         // This is the key - CreateDC accepts DEVMODE parameter!
@@ -546,7 +570,7 @@ fn print_image_with_devmode(
 
         let job_id = StartDocW(hdc, &doc_info);
         if job_id <= 0 {
-            DeleteDC(hdc)?;
+            let _ = DeleteDC(hdc);
             return Err("Failed to start print job".into());
         }
 
@@ -555,15 +579,15 @@ fn print_image_with_devmode(
         // Step 8: Start page
         if StartPage(hdc) <= 0 {
             EndDoc(hdc);
-            DeleteDC(hdc)?;
+            let _ = DeleteDC(hdc);
             return Err("Failed to start page".into());
         }
 
         // Step 9: Get printer page size in pixels
-        let page_width = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::HORZRES);
-        let page_height = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::VERTRES);
-        let dpi_x = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::LOGPIXELSX);
-        let dpi_y = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::LOGPIXELSY);
+        let page_width = GetDeviceCaps(hdc, HORZRES);
+        let page_height = GetDeviceCaps(hdc, VERTRES);
+        let dpi_x = GetDeviceCaps(hdc, LOGPIXELSX);
+        let dpi_y = GetDeviceCaps(hdc, LOGPIXELSY);
 
         tracing::info!("Printer page: {}x{} pixels at {}x{} DPI", page_width, page_height, dpi_x, dpi_y);
 
@@ -590,7 +614,7 @@ fn print_image_with_devmode(
                 biClrUsed: 0,
                 biClrImportant: 0,
             },
-            bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+            bmiColors: [RGBQUAD::default()],
         };
 
         // Convert RGB to BGR for Windows
@@ -637,7 +661,7 @@ fn print_image_with_devmode(
         if result == 0 {
             EndPage(hdc);
             EndDoc(hdc);
-            DeleteDC(hdc)?;
+            let _ = DeleteDC(hdc);
             return Err("StretchDIBits failed".into());
         }
 
@@ -646,7 +670,7 @@ fn print_image_with_devmode(
         // Step 12: End page and document
         EndPage(hdc);
         EndDoc(hdc);
-        DeleteDC(hdc)?;
+        let _ = DeleteDC(hdc);
 
         tracing::info!("=== PRINT JOB SENT SUCCESSFULLY ===");
     }
