@@ -595,12 +595,17 @@ fn print_image_with_devmode(
 
         tracing::info!("Printer page: {}x{} pixels at {}x{} DPI", page_width, page_height, dpi_x, dpi_y);
 
-        // Step 10: Prepare bitmap info for StretchDIBits
-        // Image was rendered at 600 DPI, so calculate print size
+        // Step 10: Calculate ACTUAL SIZE print dimensions
+        // Image was rendered at 600 DPI, convert to printer DPI for actual size
         let print_width = (width as i32 * dpi_x) / 600;
         let print_height = (height as i32 * dpi_y) / 600;
 
-        tracing::info!("Print size: {}x{} pixels (scaled for {} DPI)", print_width, print_height, dpi_x);
+        // CENTER the image on the page
+        let dest_x = (page_width - print_width) / 2;
+        let dest_y = (page_height - print_height) / 2;
+
+        tracing::info!("Print size: {}x{} pixels (actual size at {} DPI)", print_width, print_height, dpi_x);
+        tracing::info!("Centered at: ({}, {})", dest_x, dest_y);
 
         // Create BITMAPINFO
         // Windows DIB is BGR, bottom-up by default
@@ -645,13 +650,13 @@ fn print_image_with_devmode(
         // Set stretch mode for quality
         SetStretchBltMode(hdc, HALFTONE);
 
-        // Step 11: Draw image to printer DC
+        // Step 11: Draw image to printer DC (centered, actual size)
         let result = StretchDIBits(
             hdc,
-            0,                      // dest x
-            0,                      // dest y
-            print_width,            // dest width
-            print_height,           // dest height
+            dest_x,                 // dest x (centered)
+            dest_y,                 // dest y (centered)
+            print_width,            // dest width (actual size)
+            print_height,           // dest height (actual size)
             0,                      // src x
             0,                      // src y
             width as i32,           // src width
