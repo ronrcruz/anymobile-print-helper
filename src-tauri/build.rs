@@ -1,9 +1,6 @@
 fn main() {
-    let mut builder = tauri_build::Build::new();
-
     #[cfg(windows)]
     {
-        // Custom manifest requesting administrator privileges for SetPrinter API
         let manifest = r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -15,10 +12,13 @@ fn main() {
   </trustInfo>
 </assembly>
 "#;
-        builder = builder.windows(
-            tauri_build::WindowsAttributes::new().app_manifest(manifest)
-        );
+        let windows = tauri_build::WindowsAttributes::new().app_manifest(manifest);
+        let attrs = tauri_build::Attributes::new().windows_attributes(windows);
+        tauri_build::try_build(attrs).expect("failed to run build script");
     }
 
-    builder.run();
+    #[cfg(not(windows))]
+    {
+        tauri_build::build();
+    }
 }
