@@ -359,192 +359,304 @@ async fn ensure_sumatra_available() -> Result<PathBuf, Box<dyn std::error::Error
     Ok(sumatra_path)
 }
 
-/// Set printer defaults using SetPrinter API to PERSIST settings
-/// This is the CORRECT way - Ghostscript mswinpr2 uses printer's current defaults
+/// Render PDF to PNG using Ghostscript (high quality, 600 DPI)
 #[cfg(target_os = "windows")]
-fn set_printer_defaults(printer_name: &str) -> Result<(), String> {
-    tracing::info!("Setting printer defaults (PERSISTENT) for: {}", printer_name);
+fn render_pdf_to_png(
+    pdf_path: &str,
+    gs_path: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    // Create temp output path for PNG
+    let temp_dir = std::env::temp_dir();
+    let png_path = temp_dir.join(format!("print_{}.png", uuid::Uuid::new_v4()));
 
-    // PowerShell script that uses SetPrinter to PERSIST DEVMODE to printer defaults
-    // Per Microsoft KB: https://support.microsoft.com/en-gb/help/140285
-    let ps_script = format!(r#"
-$ErrorActionPreference = 'Stop'
-$printerName = '{}'
+    tracing::info!("Rendering PDF to PNG at 600 DPI...");
+    tracing::info!("  PDF: {}", pdf_path);
+    tracing::info!("  PNG: {:?}", png_path);
 
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
+    let args = vec![
+        "-dBATCH".to_string(),
+        "-dNOPAUSE".to_string(),
+        "-dNOSAFER".to_string(),
+        "-sDEVICE=png16m".to_string(),      // 24-bit RGB PNG
+        "-r600".to_string(),                 // 600 DPI - matches our print quality
+        "-dTextAlphaBits=4".to_string(),     // Anti-aliasing for text
+        "-dGraphicsAlphaBits=4".to_string(), // Anti-aliasing for graphics
+        format!("-sOutputFile={}", png_path.to_string_lossy()),
+        pdf_path.to_string(),
+    ];
 
-public class PrinterDefaults {{
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool OpenPrinter(string pPrinterName, out IntPtr hPrinter, IntPtr pDefault);
-
-    [DllImport("winspool.drv", SetLastError = true)]
-    public static extern bool ClosePrinter(IntPtr hPrinter);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool GetPrinter(IntPtr hPrinter, int level, IntPtr pPrinter, int cbBuf, out int pcbNeeded);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool SetPrinter(IntPtr hPrinter, int level, IntPtr pPrinter, int command);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
-    public static extern int DocumentProperties(IntPtr hwnd, IntPtr hPrinter, string pDeviceName,
-        IntPtr pDevModeOutput, IntPtr pDevModeInput, int fMode);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode)]
-    public static extern int DeviceCapabilities(string pDevice, string pPort,
-        ushort fwCapability, IntPtr pOutput, IntPtr pDevMode);
-
-    // PRINTER_INFO_2 pDevMode offset (64-bit: 8 bytes in)
-    public const int PRINTER_INFO_2_pDevMode_offset = 64;
-
-    // DEVMODE offsets
-    public const int dmFields_offset = 40;
-    public const int dmPrintQuality_offset = 58;
-    public const int dmYResolution_offset = 60;
-    public const int dmMediaType_offset = 62;
-
-    // DEVMODE flags
-    public const int DM_PRINTQUALITY = 0x0400;
-    public const int DM_YRESOLUTION = 0x2000;
-    public const int DM_MEDIATYPE = 0x0200;
-
-    // DeviceCapabilities
-    public const ushort DC_MEDIATYPES = 35;
-}}
-'@
-
-Write-Host "=== PERSISTING PRINTER DEFAULTS ==="
-
-# Step 1: Query media type IDs to find best match
-$mediaTypeId = 258  # Default to Premium Presentation Matte
-$count = [PrinterDefaults]::DeviceCapabilities($printerName, $null, [PrinterDefaults]::DC_MEDIATYPES, [IntPtr]::Zero, [IntPtr]::Zero)
-
-if ($count -gt 0) {{
-    Write-Host "Found $count media types"
-    $idBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($count * 4)
-
-    try {{
-        [PrinterDefaults]::DeviceCapabilities($printerName, $null, [PrinterDefaults]::DC_MEDIATYPES, $idBuffer, [IntPtr]::Zero) | Out-Null
-
-        $mediaTypeIds = @()
-        for ($i = 0; $i -lt $count; $i++) {{
-            $id = [System.Runtime.InteropServices.Marshal]::ReadInt32($idBuffer, $i * 4)
-            $mediaTypeIds += $id
-            Write-Host "  Media type ID: $id"
-        }}
-
-        # Priority: 258 (Premium Matte) > 261 > 257 > 260 > 3
-        if ($mediaTypeIds -contains 258) {{
-            $mediaTypeId = 258
-            Write-Host "SELECTED: Premium Presentation Matte (ID 258)"
-        }} elseif ($mediaTypeIds -contains 261) {{
-            $mediaTypeId = 261
-            Write-Host "SELECTED: Premium Glossy (ID 261)"
-        }} elseif ($mediaTypeIds -contains 257) {{
-            $mediaTypeId = 257
-            Write-Host "SELECTED: Matte Paper (ID 257)"
-        }} elseif ($mediaTypeIds -contains 3) {{
-            $mediaTypeId = 3
-            Write-Host "SELECTED: Standard Matte (ID 3)"
-        }}
-    }} finally {{
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($idBuffer)
-    }}
-}}
-
-# Step 2: Open printer and get PRINTER_INFO_2
-$hPrinter = [IntPtr]::Zero
-if (-not [PrinterDefaults]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {{
-    Write-Host "ERROR: Could not open printer"
-    exit 1
-}}
-
-try {{
-    # Get PRINTER_INFO_2 size
-    $needed = 0
-    [PrinterDefaults]::GetPrinter($hPrinter, 2, [IntPtr]::Zero, 0, [ref]$needed) | Out-Null
-    Write-Host "PRINTER_INFO_2 size: $needed bytes"
-
-    $pInfo2 = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($needed)
-
-    try {{
-        if (-not [PrinterDefaults]::GetPrinter($hPrinter, 2, $pInfo2, $needed, [ref]$needed)) {{
-            Write-Host "ERROR: GetPrinter failed"
-            exit 1
-        }}
-
-        # Get pDevMode pointer from PRINTER_INFO_2 (offset varies by struct)
-        # On x64, pDevMode is at offset 64 in PRINTER_INFO_2
-        $pDevMode = [System.Runtime.InteropServices.Marshal]::ReadIntPtr($pInfo2, [PrinterDefaults]::PRINTER_INFO_2_pDevMode_offset)
-
-        if ($pDevMode -eq [IntPtr]::Zero) {{
-            Write-Host "ERROR: pDevMode is null"
-            exit 1
-        }}
-
-        Write-Host "pDevMode pointer: $pDevMode"
-
-        # Modify DEVMODE fields
-        $dmFields = [System.Runtime.InteropServices.Marshal]::ReadInt32($pDevMode, [PrinterDefaults]::dmFields_offset)
-        $dmFields = $dmFields -bor [PrinterDefaults]::DM_PRINTQUALITY -bor [PrinterDefaults]::DM_YRESOLUTION -bor [PrinterDefaults]::DM_MEDIATYPE
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($pDevMode, [PrinterDefaults]::dmFields_offset, $dmFields)
-
-        # Set 600 DPI
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmPrintQuality_offset, 600)
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmYResolution_offset, 600)
-        Write-Host "Set resolution: 600 x 600 DPI"
-
-        # Set media type
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pDevMode, [PrinterDefaults]::dmMediaType_offset, $mediaTypeId)
-        Write-Host "Set media type: $mediaTypeId"
-
-        # Validate DEVMODE via DocumentProperties
-        $result = [PrinterDefaults]::DocumentProperties([IntPtr]::Zero, $hPrinter, $printerName, $pDevMode, $pDevMode, 10)
-        Write-Host "DocumentProperties result: $result"
-
-        # PERSIST via SetPrinter!
-        if ([PrinterDefaults]::SetPrinter($hPrinter, 2, $pInfo2, 0)) {{
-            Write-Host "SUCCESS: Printer defaults PERSISTED (MediaType=$mediaTypeId, DPI=600)"
-        }} else {{
-            $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            Write-Host "WARNING: SetPrinter returned false (error=$err) - may need admin rights"
-        }}
-    }} finally {{
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pInfo2)
-    }}
-}} finally {{
-    [PrinterDefaults]::ClosePrinter($hPrinter) | Out-Null
-}}
-"#, printer_name);
-
-    let output = Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", &ps_script])
+    let output = Command::new(gs_path)
+        .args(&args)
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("PowerShell failed: {}", e))?;
+        .output()?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    tracing::info!("Printer config output:\n{}", stdout);
-    if !stderr.is_empty() {
-        tracing::warn!("Printer config stderr:\n{}", stderr);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Ghostscript render failed: {}", stderr).into());
     }
 
-    if stdout.contains("SUCCESS") {
-        Ok(())
-    } else if stdout.contains("WARNING") {
-        // Settings applied but may not persist - continue anyway
-        Ok(())
-    } else {
-        Err(format!("Failed to configure printer: {}", stdout))
+    if !png_path.exists() {
+        return Err("Ghostscript did not create PNG output".into());
     }
+
+    tracing::info!("PNG rendered successfully");
+    Ok(png_path)
 }
 
-/// Print PDF using Ghostscript mswinpr2 - DIRECT printing at ACTUAL SIZE
-/// Settings are PERSISTED to printer defaults via SetPrinter before printing
+/// Print image using Windows GDI with custom DEVMODE (includes media type!)
+/// This is the key function - CreateDC accepts our DEVMODE directly
+#[cfg(target_os = "windows")]
+fn print_image_with_devmode(
+    image_path: &std::path::Path,
+    printer_name: &str,
+    copies: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Graphics::Gdi::{
+        CreateDCW, DeleteDC, SetStretchBltMode, StretchDIBits,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, SRCCOPY,
+    };
+    use windows::Win32::Graphics::Printing::{
+        ClosePrinter, DocumentPropertiesW, OpenPrinterW, PRINTER_DEFAULTSW,
+        DM_IN_BUFFER, DM_OUT_BUFFER,
+    };
+    use windows::Win32::Graphics::Gdi::{StartDocW, StartPage, EndPage, EndDoc, DOCINFOW};
+
+    tracing::info!("=== PRINTING WITH CUSTOM DEVMODE ===");
+    tracing::info!("Image: {:?}", image_path);
+    tracing::info!("Printer: {}", printer_name);
+    tracing::info!("Copies: {}", copies);
+
+    // Load the image
+    let img = image::open(image_path)?;
+    let rgb_img = img.to_rgb8();
+    let (width, height) = rgb_img.dimensions();
+    tracing::info!("Image dimensions: {}x{} pixels", width, height);
+
+    // Convert printer name to wide string
+    let printer_name_wide: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        // Step 1: Open printer
+        let mut hprinter = HANDLE::default();
+        let result = OpenPrinterW(
+            PCWSTR(printer_name_wide.as_ptr()),
+            &mut hprinter,
+            None,
+        );
+
+        if result.is_err() {
+            return Err(format!("Failed to open printer: {}", printer_name).into());
+        }
+
+        tracing::info!("Opened printer handle");
+
+        // Step 2: Get DEVMODE size
+        let devmode_size = DocumentPropertiesW(
+            None,
+            hprinter,
+            PCWSTR(printer_name_wide.as_ptr()),
+            None,
+            None,
+            0,
+        );
+
+        if devmode_size <= 0 {
+            ClosePrinter(hprinter)?;
+            return Err("Failed to get DEVMODE size".into());
+        }
+
+        tracing::info!("DEVMODE size: {} bytes", devmode_size);
+
+        // Step 3: Allocate and get DEVMODE
+        let mut devmode_buffer = vec![0u8; devmode_size as usize];
+        let devmode_ptr = devmode_buffer.as_mut_ptr() as *mut windows::Win32::Graphics::Gdi::DEVMODEW;
+
+        let result = DocumentPropertiesW(
+            None,
+            hprinter,
+            PCWSTR(printer_name_wide.as_ptr()),
+            Some(devmode_ptr),
+            None,
+            DM_OUT_BUFFER,
+        );
+
+        if result < 0 {
+            ClosePrinter(hprinter)?;
+            return Err("Failed to get DEVMODE".into());
+        }
+
+        // Step 4: Modify DEVMODE for our settings
+        // DEVMODE field flags
+        const DM_PRINTQUALITY: u32 = 0x0400;
+        const DM_YRESOLUTION: u32 = 0x2000;
+        const DM_MEDIATYPE: u32 = 0x08000000;
+        const DM_COPIES: u32 = 0x0100;
+
+        (*devmode_ptr).dmFields |= DM_PRINTQUALITY | DM_YRESOLUTION | DM_MEDIATYPE | DM_COPIES;
+        (*devmode_ptr).dmPrintQuality = 600;   // 600 DPI horizontal
+        (*devmode_ptr).dmYResolution = 600;    // 600 DPI vertical
+        (*devmode_ptr).Anonymous1.Anonymous1.dmCopies = copies as i16;
+
+        // THE KEY SETTING: Media type 258 = Premium Presentation Matte
+        (*devmode_ptr).dmMediaType = 258;
+
+        tracing::info!("Set DEVMODE: 600 DPI, MediaType=258 (Premium Matte), Copies={}", copies);
+
+        // Step 5: Validate DEVMODE via DocumentProperties (merge with driver)
+        let result = DocumentPropertiesW(
+            None,
+            hprinter,
+            PCWSTR(printer_name_wide.as_ptr()),
+            Some(devmode_ptr),
+            Some(devmode_ptr),
+            DM_IN_BUFFER | DM_OUT_BUFFER,
+        );
+
+        tracing::info!("DocumentProperties validate result: {}", result);
+
+        // Close printer handle (we'll use CreateDC next)
+        ClosePrinter(hprinter)?;
+
+        // Step 6: Create printer DC with OUR DEVMODE
+        // This is the key - CreateDC accepts DEVMODE parameter!
+        let hdc = CreateDCW(
+            PCWSTR::null(),
+            PCWSTR(printer_name_wide.as_ptr()),
+            PCWSTR::null(),
+            Some(devmode_ptr),  // <-- THIS passes our media type 258!
+        );
+
+        if hdc.is_invalid() {
+            return Err("Failed to create printer DC with DEVMODE".into());
+        }
+
+        tracing::info!("Created printer DC with custom DEVMODE");
+
+        // Step 7: Start document
+        let doc_name: Vec<u16> = "AnyMobile Label".encode_utf16().chain(std::iter::once(0)).collect();
+        let doc_info = DOCINFOW {
+            cbSize: std::mem::size_of::<DOCINFOW>() as i32,
+            lpszDocName: PCWSTR(doc_name.as_ptr()),
+            lpszOutput: PCWSTR::null(),
+            lpszDatatype: PCWSTR::null(),
+            fwType: 0,
+        };
+
+        let job_id = StartDocW(hdc, &doc_info);
+        if job_id <= 0 {
+            DeleteDC(hdc)?;
+            return Err("Failed to start print job".into());
+        }
+
+        tracing::info!("Started print job ID: {}", job_id);
+
+        // Step 8: Start page
+        if StartPage(hdc) <= 0 {
+            EndDoc(hdc);
+            DeleteDC(hdc)?;
+            return Err("Failed to start page".into());
+        }
+
+        // Step 9: Get printer page size in pixels
+        let page_width = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::HORZRES);
+        let page_height = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::VERTRES);
+        let dpi_x = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::LOGPIXELSX);
+        let dpi_y = windows::Win32::Graphics::Gdi::GetDeviceCaps(hdc, windows::Win32::Graphics::Gdi::LOGPIXELSY);
+
+        tracing::info!("Printer page: {}x{} pixels at {}x{} DPI", page_width, page_height, dpi_x, dpi_y);
+
+        // Step 10: Prepare bitmap info for StretchDIBits
+        // Image was rendered at 600 DPI, so calculate print size
+        let print_width = (width as i32 * dpi_x) / 600;
+        let print_height = (height as i32 * dpi_y) / 600;
+
+        tracing::info!("Print size: {}x{} pixels (scaled for {} DPI)", print_width, print_height, dpi_x);
+
+        // Create BITMAPINFO
+        // Windows DIB is BGR, bottom-up by default
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32), // Negative = top-down
+                biPlanes: 1,
+                biBitCount: 24,
+                biCompression: BI_RGB.0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+        };
+
+        // Convert RGB to BGR for Windows
+        let mut bgr_data: Vec<u8> = Vec::with_capacity((width * height * 3) as usize);
+        for pixel in rgb_img.pixels() {
+            bgr_data.push(pixel[2]); // B
+            bgr_data.push(pixel[1]); // G
+            bgr_data.push(pixel[0]); // R
+        }
+
+        // Pad rows to 4-byte boundary (Windows requirement)
+        let row_size = ((width * 3 + 3) / 4) * 4;
+        let mut padded_data: Vec<u8> = Vec::with_capacity((row_size * height) as usize);
+        for y in 0..height {
+            let row_start = (y * width * 3) as usize;
+            let row_end = row_start + (width * 3) as usize;
+            padded_data.extend_from_slice(&bgr_data[row_start..row_end]);
+            // Add padding bytes
+            for _ in 0..(row_size - width * 3) {
+                padded_data.push(0);
+            }
+        }
+
+        // Set stretch mode for quality
+        SetStretchBltMode(hdc, HALFTONE);
+
+        // Step 11: Draw image to printer DC
+        let result = StretchDIBits(
+            hdc,
+            0,                      // dest x
+            0,                      // dest y
+            print_width,            // dest width
+            print_height,           // dest height
+            0,                      // src x
+            0,                      // src y
+            width as i32,           // src width
+            height as i32,          // src height
+            Some(padded_data.as_ptr() as *const std::ffi::c_void),
+            &bmi,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+
+        if result == 0 {
+            EndPage(hdc);
+            EndDoc(hdc);
+            DeleteDC(hdc)?;
+            return Err("StretchDIBits failed".into());
+        }
+
+        tracing::info!("StretchDIBits drew {} scan lines", result);
+
+        // Step 12: End page and document
+        EndPage(hdc);
+        EndDoc(hdc);
+        DeleteDC(hdc)?;
+
+        tracing::info!("=== PRINT JOB SENT SUCCESSFULLY ===");
+    }
+
+    Ok(())
+}
+
+/// Print PDF using Ghostscript to render + Windows GDI with custom DEVMODE
+/// This approach passes our DEVMODE (with media type 258) directly to CreateDC
+/// No admin rights needed - no SetPrinter call!
 #[cfg(target_os = "windows")]
 async fn print_pdf_ghostscript(
     pdf_path: &str,
@@ -552,7 +664,7 @@ async fn print_pdf_ghostscript(
     copies: u32,
     gs_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("=== WINDOWS PRINT (Direct mswinpr2) ===");
+    tracing::info!("=== WINDOWS PRINT (GDI with Custom DEVMODE) ===");
     tracing::info!("PDF path: {}", pdf_path);
     tracing::info!("Printer: {:?}", printer_name);
     tracing::info!("Copies: {}", copies);
@@ -572,53 +684,21 @@ async fn print_pdf_ghostscript(
 
     tracing::info!("Using printer: {}", printer);
 
-    // Step 1: PERSIST printer settings via SetPrinter API
-    // This sets paper type and resolution in the printer's defaults
-    tracing::info!("Step 1: Persisting printer defaults (SetPrinter)...");
-    match set_printer_defaults(&printer) {
-        Ok(()) => tracing::info!("Printer defaults PERSISTED: 600 DPI + Premium Matte"),
-        Err(e) => tracing::warn!("SetPrinter warning: {}. Continuing anyway.", e),
+    // Step 1: Render PDF to high-quality PNG using Ghostscript
+    tracing::info!("Step 1: Rendering PDF to PNG at 600 DPI...");
+    let png_path = render_pdf_to_png(pdf_path, gs_path)?;
+
+    // Step 2: Print PNG using Windows GDI with our DEVMODE
+    // This is the key - CreateDC accepts our DEVMODE with media type 258!
+    tracing::info!("Step 2: Printing PNG with custom DEVMODE (media type 258)...");
+    let result = print_image_with_devmode(&png_path, &printer, copies);
+
+    // Clean up temp PNG
+    if let Err(e) = std::fs::remove_file(&png_path) {
+        tracing::warn!("Failed to clean up temp PNG: {}", e);
     }
 
-    // Step 2: Print PDF directly via Ghostscript mswinpr2
-    // mswinpr2 uses the printer's current defaults (which we just set)
-    tracing::info!("Step 2: Printing PDF directly via mswinpr2...");
-
-    let args = vec![
-        "-dBATCH".to_string(),
-        "-dNOPAUSE".to_string(),
-        "-dNOSAFER".to_string(),
-        "-sDEVICE=mswinpr2".to_string(),
-        format!("-sOutputFile=%printer%{}", printer),
-        "-dFitPage=false".to_string(),           // ACTUAL SIZE - no scaling!
-        format!("-dNumCopies={}", copies),
-        pdf_path.to_string(),
-    ];
-
-    tracing::debug!("Ghostscript args: {:?}", args);
-
-    let output = Command::new(gs_path)
-        .args(&args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    tracing::info!("Ghostscript stdout: {}", stdout);
-    if !stderr.is_empty() {
-        tracing::warn!("Ghostscript stderr: {}", stderr);
-    }
-
-    if !output.status.success() {
-        let err_msg = format!(
-            "Ghostscript print failed (exit code {:?}): {}",
-            output.status.code(),
-            stderr
-        );
-        tracing::error!("{}", err_msg);
-        return Err(err_msg.into());
-    }
+    result?;
 
     tracing::info!("=== WINDOWS PRINT COMPLETE ===");
     Ok(())

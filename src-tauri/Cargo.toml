@@ -1,6 +1,6 @@
 [package]
 name = "anymobile-print-helper"
-version = "1.0.43"
+version = "1.0.44"
 description = "Desktop print helper for AnyMobile label printing"
 authors = ["AnyMobile"]
 edition = "2021"
@@ -35,8 +35,10 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_Storage_Xps",
 ] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+image = "0.25"
 
 [features]
 default = ["custom-protocol"]
