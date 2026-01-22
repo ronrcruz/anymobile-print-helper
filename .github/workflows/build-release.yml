@@ -29,6 +29,8 @@ jobs:
             target: x86_64-apple-darwin
           - platform: macos-latest
             target: aarch64-apple-darwin
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.platform }}
 
@@ -51,6 +53,13 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
       - name: Install Node dependencies
         run: npm install
 
@@ -70,6 +79,12 @@ jobs:
         run: |
           brew install imagemagick
           magick src-tauri/icons/icon.png -define icon:auto-resize=256,128,64,48,32,16 src-tauri/icons/icon.ico
+
+      - name: Generate ICO icon (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get install -y imagemagick
+          convert src-tauri/icons/icon.png -define icon:auto-resize=256,128,64,48,32,16 src-tauri/icons/icon.ico
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
@@ -91,6 +106,9 @@ jobs:
 
             ### macOS (Apple Silicon / M1/M2/M3)
             Download the `aarch64.dmg` file, open it, and drag the app to Applications.
+
+            ### Linux (x64)
+            Download the `.deb` file and install with `sudo dpkg -i <filename>.deb`. Requires `libwebkit2gtk-4.1-0` at runtime.
 
             ## What's New
             - HTTPS support for secure communication with web app

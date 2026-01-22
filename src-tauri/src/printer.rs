@@ -21,12 +21,12 @@ pub fn list_printers() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> {
         list_printers_windows()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        list_printers_macos()
+        list_printers_unix()
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         Ok(vec![])
     }
@@ -51,9 +51,9 @@ pub async fn print_pdf(
         print_pdf_windows(&temp_path, printer_name, copies).await?;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        print_pdf_macos(&temp_path, printer_name, copies).await?;
+        print_pdf_unix(&temp_path, printer_name, copies).await?;
     }
 
     // Keep temp file alive until print job is queued
@@ -813,11 +813,11 @@ async fn print_pdf_windows(
 }
 
 // ============================================================================
-// macOS Implementation
+// macOS/Linux Implementation (CUPS)
 // ============================================================================
 
-#[cfg(target_os = "macos")]
-fn list_printers_macos() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn list_printers_unix() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> {
     let output = Command::new("lpstat")
         .args(["-p", "-d"])
         .output()?;
@@ -866,8 +866,8 @@ fn list_printers_macos() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>>
     Ok(printers)
 }
 
-#[cfg(target_os = "macos")]
-async fn print_pdf_macos(
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn print_pdf_unix(
     pdf_path: &str,
     printer_name: Option<&str>,
     copies: u32,
