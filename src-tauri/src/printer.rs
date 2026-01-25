@@ -886,13 +886,14 @@ async fn print_pdf_unix(
         let printer_lower = printer.to_lowercase();
 
         if printer_lower.contains("epson") {
-            // Epson-specific: 600 DPI, highest quality, premium matte paper
+            // Epson-specific: 1200 DPI, highest quality, premium matte paper
+            // ET-3830 supports up to 5760×1440 DPI, so 1200 is well within range
             args.extend([
-                "-o".to_string(), "Resolution=600x600dpi".to_string(),
+                "-o".to_string(), "Resolution=1200x1200dpi".to_string(),
                 "-o".to_string(), "EPIJ_Qual=307".to_string(),
                 "-o".to_string(), "EPIJ_Medi=12".to_string(),  // Premium Presentation Paper Matte
             ]);
-            tracing::info!("Applying Epson high-quality settings: 600dpi, quality=307, matte paper");
+            tracing::info!("Applying Epson high-quality settings: 1200dpi, quality=307, matte paper");
         } else if printer_lower.contains("hp") || printer_lower.contains("laserjet") {
             // HP-specific: use labels media type
             args.extend([
@@ -913,6 +914,12 @@ async fn print_pdf_unix(
 
     args.push(pdf_path.to_string());
 
+    // Diagnostic logging for print quality debugging
+    if let Ok(metadata) = std::fs::metadata(pdf_path) {
+        tracing::info!("PDF file size: {} bytes ({:.2} KB)", metadata.len(), metadata.len() as f64 / 1024.0);
+    }
+    tracing::info!("=== LINUX/macOS PRINT (CUPS lp) ===");
+    tracing::info!("Full lp command: lp {}", args.join(" "));
     tracing::info!("Executing lp with args: {:?}", args);
 
     let status = Command::new("lp")
@@ -920,8 +927,10 @@ async fn print_pdf_unix(
         .status()?;
 
     if !status.success() {
+        tracing::error!("lp print command failed with status: {:?}", status);
         return Err("lp print command failed".into());
     }
 
+    tracing::info!("=== LINUX/macOS PRINT COMPLETE ===");
     Ok(())
 }
