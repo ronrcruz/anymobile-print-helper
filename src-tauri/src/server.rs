@@ -2,7 +2,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -22,6 +22,7 @@ use crate::printer;
 /// Server configuration
 pub const HTTPS_PORT: u16 = 9847;
 pub const HTTP_PORT: u16 = 9848;
+const MAX_PRINT_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
 /// Server state
 struct ServerState {
@@ -54,6 +55,10 @@ struct PrintResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "jobId")]
     job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
 }
 
 /// Print request options
@@ -137,6 +142,7 @@ pub async fn start_server(app_handle: AppHandle) -> Result<(), Box<dyn std::erro
         .route("/ping", get(handle_ping))
         .route("/printers", get(handle_printers))
         .route("/print", post(handle_print))
+        .layer(DefaultBodyLimit::max(MAX_PRINT_UPLOAD_BYTES))
         .layer(cors)
         .with_state(state);
 
@@ -208,6 +214,8 @@ async fn handle_print(
                 success: false,
                 error: Some(format!("Failed to parse form data: {}", e)),
                 job_id: None,
+                status: None,
+                warning: None,
             }),
         )
     })? {
@@ -220,8 +228,14 @@ async fn handle_print(
                         StatusCode::BAD_REQUEST,
                         Json(PrintResponse {
                             success: false,
-                            error: Some(format!("Failed to read PDF data: {}", e)),
+                            error: Some(format!(
+                                "Failed to read PDF data: {}. Maximum print upload is {} MB.",
+                                e,
+                                MAX_PRINT_UPLOAD_BYTES / 1024 / 1024
+                            )),
                             job_id: None,
+                            status: None,
+                            warning: None,
                         }),
                     )
                 })?);
@@ -248,16 +262,20 @@ async fn handle_print(
                 success: false,
                 error: Some("No PDF data provided".to_string()),
                 job_id: None,
+                status: None,
+                warning: None,
             }),
         )
     })?;
 
     // Save PDF to temp file and print
     match printer::print_pdf(&pdf_data, options.printer.as_deref(), options.copies.unwrap_or(1)).await {
-        Ok(job_id) => Ok(Json(PrintResponse {
+        Ok(result) => Ok(Json(PrintResponse {
             success: true,
             error: None,
-            job_id: Some(job_id),
+            job_id: Some(result.job_id),
+            status: result.status,
+            warning: result.warning,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -265,6 +283,8 @@ async fn handle_print(
                 success: false,
                 error: Some(e.to_string()),
                 job_id: None,
+                status: None,
+                warning: None,
             }),
         )),
     }

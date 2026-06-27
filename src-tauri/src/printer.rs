@@ -4,8 +4,15 @@ use crate::server::PrinterInfo;
 use std::process::Command;
 use tempfile::NamedTempFile;
 use std::io::Write;
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 use uuid::Uuid;
+
+pub struct PrintJobResult {
+    pub job_id: String,
+    pub status: Option<String>,
+    pub warning: Option<String>,
+}
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -37,30 +44,36 @@ pub async fn print_pdf(
     pdf_data: &[u8],
     printer_name: Option<&str>,
     copies: u32,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PrintJobResult, Box<dyn std::error::Error + Send + Sync>> {
     // Save PDF to temp file
     let mut temp_file = NamedTempFile::with_suffix(".pdf")?;
     temp_file.write_all(pdf_data)?;
     let temp_path = temp_file.path().to_string_lossy().to_string();
 
-    // Generate job ID
-    let job_id = Uuid::new_v4().to_string();
-
     #[cfg(target_os = "windows")]
     {
         print_pdf_windows(&temp_path, printer_name, copies).await?;
+        // Windows GDI/Sumatra paths do not currently expose a native queue id.
+        let job_id = Uuid::new_v4().to_string();
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        return Ok(PrintJobResult {
+            job_id,
+            status: Some("Submitted to Windows print spooler".to_string()),
+            warning: None,
+        });
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        print_pdf_unix(&temp_path, printer_name, copies).await?;
+        let mut result = print_pdf_unix(&temp_path, printer_name, copies).await?;
+        // Give CUPS a short moment to transition from accepted to backend status.
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        if let Some(queue_status) = inspect_unix_job_status(&result.job_id) {
+            result.warning = queue_warning_from_status(&queue_status);
+            result.status = Some(queue_status);
+        }
+        return Ok(result);
     }
-
-    // Keep temp file alive until print job is queued
-    // (it will be deleted when temp_file goes out of scope after a delay)
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-    Ok(job_id)
 }
 
 // ============================================================================
@@ -835,9 +848,14 @@ fn list_printers_unix() -> Result<Vec<PrinterInfo>, Box<dyn std::error::Error>> 
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let name = parts[1].to_string();
-                let status = if line.contains("idle") {
+                let lower = line.to_lowercase();
+                let status = if lower.contains("disabled") {
+                    "disabled"
+                } else if lower.contains("offline") || lower.contains("not responding") {
+                    "offline"
+                } else if lower.contains("idle") {
                     "ready"
-                } else if line.contains("printing") {
+                } else if lower.contains("printing") {
                     "busy"
                 } else {
                     "unknown"
@@ -871,7 +889,7 @@ async fn print_pdf_unix(
     pdf_path: &str,
     printer_name: Option<&str>,
     copies: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PrintJobResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut args = vec![
         "-n".to_string(),
         copies.to_string(),
@@ -922,15 +940,101 @@ async fn print_pdf_unix(
     tracing::info!("Full lp command: lp {}", args.join(" "));
     tracing::info!("Executing lp with args: {:?}", args);
 
-    let status = Command::new("lp")
+    let output = Command::new("lp")
         .args(&args)
-        .status()?;
+        .output()?;
 
-    if !status.success() {
-        tracing::error!("lp print command failed with status: {:?}", status);
-        return Err("lp print command failed".into());
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        tracing::error!("lp print command failed with status: {:?}", output.status);
+        if !stderr.is_empty() {
+            tracing::error!("lp stderr: {}", stderr);
+        }
+        return Err(if stderr.is_empty() {
+            "lp print command failed".into()
+        } else {
+            format!("lp print command failed: {}", stderr).into()
+        });
     }
 
-    tracing::info!("=== LINUX/macOS PRINT COMPLETE ===");
-    Ok(())
+    if !stdout.is_empty() {
+        tracing::info!("lp stdout: {}", stdout);
+    }
+    if !stderr.is_empty() {
+        tracing::warn!("lp stderr: {}", stderr);
+    }
+
+    let job_id = parse_lp_job_id(&stdout).unwrap_or_else(|| Uuid::new_v4().to_string());
+    tracing::info!("=== LINUX/macOS PRINT QUEUED: {} ===", job_id);
+
+    Ok(PrintJobResult {
+        job_id,
+        status: Some(stdout),
+        warning: None,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn parse_lp_job_id(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == '.'))
+        .find(|token| {
+            token
+                .rsplit_once('-')
+                .map(|(_, suffix)| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+        })
+        .map(|token| token.to_string())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn inspect_unix_job_status(job_id: &str) -> Option<String> {
+    let output = Command::new("lpstat")
+        .args(["-l", "-o", job_id])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() && !stdout.is_empty() {
+        tracing::info!("lpstat status for {}: {}", job_id, stdout.replace('\n', " | "));
+        Some(stdout)
+    } else if !stderr.is_empty() {
+        tracing::warn!("lpstat status lookup failed for {}: {}", job_id, stderr);
+        Some(stderr)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn queue_warning_from_status(status: &str) -> Option<String> {
+    let lower = status.to_lowercase();
+    let warning_markers = [
+        "looking for printer",
+        "offline",
+        "disabled",
+        "not responding",
+        "unable",
+        "stopped",
+        "held",
+        "cups-ipp-conformance-failure",
+    ];
+
+    if warning_markers.iter().any(|marker| lower.contains(marker)) {
+        status
+            .lines()
+            .find(|line| {
+                let line_lower = line.to_lowercase();
+                warning_markers.iter().any(|marker| line_lower.contains(marker))
+            })
+            .map(|line| line.trim().to_string())
+            .or_else(|| Some(status.to_string()))
+    } else {
+        None
+    }
 }
